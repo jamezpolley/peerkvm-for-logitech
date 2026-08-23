@@ -2,7 +2,10 @@ import sys
 import time
 from argparse import ArgumentParser
 
+from rich.console import Console
+
 from .. import exceptions
+from ..monitors import Ddcutil
 from ..node import FlowNode
 from ..node_config import NodeConfig
 from ..node_config import load_node_config
@@ -87,7 +90,10 @@ class FlowNodeCommand(LogitechFlowKvmCommand):
                     "terminal and complete setup in the UI."
                 )
             return current
-        configured = NodeSetupApp(discover_device_advertisements, current).run()
+        Console().print("Detecting Logitech devices and DDC/CI monitors…")
+        configured = NodeSetupApp(
+            discover_device_advertisements, current, Ddcutil()
+        ).run()
         if configured is None:
             raise exceptions.UserError("Node setup was cancelled; nothing was saved.")
         save_node_config(configured)

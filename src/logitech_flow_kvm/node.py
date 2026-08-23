@@ -10,6 +10,8 @@ import pyperclip
 
 from . import constants
 from .device_matching import match_device
+from .monitors import Ddcutil
+from .monitors import DdcutilError
 from .node_config import NodeConfig
 from .node_devices import NodeDeviceManager
 from .node_protocol import BroadcastTransport
@@ -45,12 +47,14 @@ class FlowNode:
         *,
         port: int = constants.DEFAULT_PORT,
         on_change: Callable[[], None] | None = None,
+        ddcutil: Ddcutil | None = None,
     ):
         self.config = config
         self.secret = secret
         self.hostname = socket.gethostname()
         self.node_id = self.hostname
         self.on_change = on_change or (lambda: None)
+        self.ddcutil = ddcutil or Ddcutil()
         self.peers: dict[str, PeerStatus] = {}
         self.device_matches: dict[tuple[str, str], str] = {}
         self._peer_lock = threading.Lock()
@@ -135,7 +139,39 @@ class FlowNode:
             except pyperclip.PyperclipException as error:
                 self.last_problem = f"Could not set clipboard: {error}"
                 logger.warning(self.last_problem)
+        if self.config.monitor_inputs:
+            threading.Thread(target=self._switch_monitors, daemon=True).start()
         self.announce(self.config.host_number)
+
+    def _switch_monitors(self) -> None:
+        try:
+            monitors = {monitor.id: monitor for monitor in self.ddcutil.detect()}
+            for configured in self.config.monitor_inputs:
+                monitor = monitors.get(configured.monitor_id)
+                if monitor is None:
+                    logger.warning(
+                        "Configured monitor is not currently detected: %s",
+                        configured.monitor_id,
+                    )
+                    continue
+                try:
+                    self.ddcutil.set_input(monitor, configured.input_source)
+                except DdcutilError as error:
+                    self.last_problem = (
+                        f"Could not switch {monitor.description}: {error}"
+                    )
+                    logger.warning(self.last_problem)
+                    self._changed()
+                else:
+                    logger.info(
+                        "Switched %s to input source 0x%02x",
+                        monitor.description,
+                        configured.input_source,
+                    )
+        except DdcutilError as error:
+            self.last_problem = f"Could not switch monitor input: {error}"
+            logger.warning(self.last_problem)
+            self._changed()
 
     def _device_disconnected(self, device_id: str) -> None:
         if device_id != self.config.leader_id or not self.config.clipboard_enabled:

@@ -1,6 +1,8 @@
 from unittest.mock import Mock
 
+from logitech_flow_kvm.monitors import Monitor
 from logitech_flow_kvm.node import FlowNode
+from logitech_flow_kvm.node_config import MonitorInputConfig
 from logitech_flow_kvm.node_config import NodeConfig
 from logitech_flow_kvm.node_protocol import NodeAdvertisement
 
@@ -61,3 +63,23 @@ def test_invalid_secret_problem_is_visible_in_status():
 
     assert "shared secrets differ" in (node.last_problem or "")
     changed.assert_called_once()
+
+
+def test_configured_monitor_is_switched_to_its_local_input():
+    ddcutil = Mock()
+    monitor = Monitor("PHL@HDMI-5", 1, 13, "HDMI-5", "Philips")
+    ddcutil.detect.return_value = [monitor]
+    node = FlowNode(
+        NodeConfig(
+            2,
+            "KEYS",
+            ["MOUSE"],
+            monitor_inputs=[MonitorInputConfig(monitor.id, 0x11)],
+        ),
+        "secret",
+        ddcutil=ddcutil,
+    )
+
+    node._switch_monitors()
+
+    ddcutil.set_input.assert_called_once_with(monitor, 0x11)

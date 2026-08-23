@@ -29,6 +29,8 @@ If you'd rather see what it does before reading how to set it up, there's a proj
 
 - Automatically switches all devices from one host to another when just one of your devices switches hosts.  This is particularly useful if you are using a device like the MX Keys Mini which includes buttons that can be used for switching hosts with a single keypress.
 - Securely keeps clipboards in sync when switching between hosts. Now you can copy/paste from one host to another without thinking anything about it.
+- Optionally switches one or more DDC/CI monitor inputs with `ddcutil` when the
+  leader keyboard arrives on a host.
 - Symmetric peer discovery over authenticated, encrypted LAN broadcasts -- no
   server role, certificates, or pairing-code workflow.
 - A live TUI for setup and status, with clear waiting/error states when a
@@ -76,6 +78,21 @@ install the project into the system Python.
 All peers must be on a LAN that permits IPv4 broadcast traffic on UDP port
 `24801`. Host firewalls and Wi-Fi client isolation must allow that traffic.
 
+## Optional monitor input switching
+
+Install `ddcutil` and make sure the user running `flow-node` can access the
+relevant `/dev/i2c-*` devices. Distribution packages commonly configure an
+`i2c` group; after adding your user to it, log out and back in. Verify the setup
+before starting Flow:
+
+```
+ddcutil detect --brief
+```
+
+See the [ddcutil I²C permissions documentation](https://www.ddcutil.com/i2c_permissions/)
+if `detect` reports `EACCES`. Monitors must have DDC/CI enabled in their on-screen
+settings.
+
 # Basic Use
 
 Run the same command on every computer, using the same shared secret:
@@ -100,7 +117,20 @@ Configure each computer as follows:
 2. Enter the host number printed on the Logitech device's host-selection key.
 3. Select the keyboard whose host key will initiate switching as the leader.
 4. Select the mouse and any other devices that should follow it.
-5. Choose **Save and start**.
+5. For each detected monitor that should follow this host, select one of the
+   advertised Feature `0x60` input values. Leave it blank to disable switching
+   for that monitor.
+6. Choose **Save and start**.
+
+The setup screen runs `ddcutil detect`, then reads `ddcutil capabilities` for
+each monitor. It displays the reported MCCS version and the values advertised
+for Feature `0x60` (Input Source), for example `0x11: HDMI-1` or
+`0x0f: DisplayPort-1`. The selected value is local to this node: choose the
+input physically connected to that computer.
+
+Some monitors publish incomplete or incorrect capability strings. Flow uses
+the monitor-reported values as requested and reports any failing `setvcp`
+operation in the runtime TUI instead of silently trying another input.
 
 When configuring a Bluetooth device for the first time, it must be connected to
 that computer long enough to appear in the setup screen. Once saved, the entry
@@ -127,7 +157,9 @@ Suppose the keyboard and mouse are connected to host 1 and the keyboard's host
 2. The keyboard connects to host 2. Dynamic udev monitoring detects the new
    `hidraw` device without restarting `flow-node`.
 3. Host 2 broadcasts that the leader is now on host 2.
-4. Host 1 receives that announcement and instructs the mouse it still holds to
+4. Host 2 sends `ddcutil setvcp 60 VALUE` to every monitor configured on that
+   node.
+5. Host 1 receives the announcement and instructs the mouse it still holds to
    switch to host 2.
 
 Missing devices are never treated as a startup error: only the peer that can
@@ -208,6 +240,10 @@ The TUI reports common problems directly:
   reload the rules, and reconnect the device or reboot.
 - **Not currently detected**: the Bluetooth device is on another host. This is
   expected after its local ID has been saved.
+- **ddcutil EACCES**: grant the runtime user access to the relevant
+  `/dev/i2c-*` devices, then log out and back in.
+- **Feature 0x60 has no advertised values**: enable DDC/CI in the monitor menu;
+  if it remains absent, that monitor cannot be configured automatically.
 
 # Logs
 

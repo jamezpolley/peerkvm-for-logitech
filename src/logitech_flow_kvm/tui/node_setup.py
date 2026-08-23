@@ -13,6 +13,11 @@ from textual.widgets import Label
 from textual.widgets import Select
 from textual.widgets import SelectionList
 
+from ..monitors import Ddcutil
+from ..monitors import DdcutilError
+from ..monitors import Monitor
+from ..monitors import MonitorCapabilities
+from ..node_config import MonitorInputConfig
 from ..node_config import NodeConfig
 from ..node_protocol import DeviceAdvertisement
 
@@ -30,16 +35,22 @@ class NodeSetupApp(App[NodeConfig | None]):
         self,
         discover: Callable[[], list[DeviceAdvertisement]],
         current: NodeConfig | None = None,
+        ddcutil: Ddcutil | None = None,
     ):
         super().__init__()
         self.discover = discover
         self.current = current
+        self.ddcutil = ddcutil
+        self.monitors: list[tuple[Monitor, MonitorCapabilities]] = []
+        self.monitor_problem: str | None = None
+        self.monitor_select_ids: dict[str, str] = {}
         self.discovery_problem: str | None = None
         try:
             self.devices = discover()
         except Exception as error:
             self.devices = []
             self.discovery_problem = f"Device discovery failed: {error}"
+        self._discover_monitors()
 
     def compose(self) -> ComposeResult:
         options = self._options()
@@ -76,7 +87,39 @@ class NodeSetupApp(App[NodeConfig | None]):
                 value=self.current.clipboard_enabled if self.current else True,
                 id="clipboard",
             )
-            yield Label(self.discovery_problem or "", id="problem")
+            yield Label("Monitor input switching")
+            if self.monitors:
+                for index, (monitor, capabilities) in enumerate(self.monitors):
+                    select_id = f"monitor-input-{index}"
+                    self.monitor_select_ids[select_id] = monitor.id
+                    current_source = self._current_monitor_source(monitor.id)
+                    yield Label(
+                        f"{monitor.description} — {monitor.connector} — "
+                        f"MCCS {capabilities.mccs_version}"
+                    )
+                    yield Select(
+                        [
+                            (f"0x{source.value:02x}: {source.name}", source.value)
+                            for source in capabilities.input_sources
+                        ],
+                        value=(
+                            current_source
+                            if current_source is not None
+                            else Select.NULL
+                        ),
+                        prompt="Do not switch this monitor",
+                        id=select_id,
+                    )
+            else:
+                yield Label(self.monitor_problem or "No DDC/CI monitors detected")
+            yield Label(
+                " | ".join(
+                    problem
+                    for problem in [self.discovery_problem, self.monitor_problem]
+                    if problem
+                ),
+                id="problem",
+            )
             yield Button("Refresh devices", id="refresh")
             yield Button("Save and start", variant="primary", id="save")
         yield Footer()
@@ -97,6 +140,32 @@ class NodeSetupApp(App[NodeConfig | None]):
                 if device_id not in known
             )
         return options
+
+    def _discover_monitors(self) -> None:
+        if self.ddcutil is None:
+            return
+        try:
+            for monitor in self.ddcutil.detect():
+                try:
+                    capabilities = self.ddcutil.capabilities(monitor)
+                except DdcutilError as error:
+                    self.monitor_problem = str(error)
+                    continue
+                self.monitors.append((monitor, capabilities))
+        except DdcutilError as error:
+            self.monitor_problem = str(error)
+
+    def _current_monitor_source(self, monitor_id: str) -> int | None:
+        if self.current is None:
+            return None
+        return next(
+            (
+                item.input_source
+                for item in self.current.monitor_inputs
+                if item.monitor_id == monitor_id
+            ),
+            None,
+        )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "refresh":
@@ -148,11 +217,24 @@ class NodeSetupApp(App[NodeConfig | None]):
         if not followers:
             problem.update("Choose at least one follower device.")
             return
+        monitor_inputs: list[MonitorInputConfig] = []
+        detected_monitor_ids = {monitor.id for monitor, _ in self.monitors}
+        for select_id, monitor_id in self.monitor_select_ids.items():
+            value = self.query_one(f"#{select_id}", Select).value
+            if isinstance(value, int):
+                monitor_inputs.append(MonitorInputConfig(monitor_id, value))
+        if self.current is not None:
+            monitor_inputs.extend(
+                item
+                for item in self.current.monitor_inputs
+                if item.monitor_id not in detected_monitor_ids
+            )
         self.exit(
             NodeConfig(
                 host_number=host_number,
                 leader_id=str(leader),
                 follower_ids=[str(value) for value in followers],
                 clipboard_enabled=self.query_one("#clipboard", Checkbox).value,
+                monitor_inputs=monitor_inputs,
             )
         )
