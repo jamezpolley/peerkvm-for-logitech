@@ -3,8 +3,7 @@ from logitech_flow_kvm.udev_monitor import parse_uevent
 
 def test_parse_kernel_uevent():
     event = parse_uevent(
-        b"add@/devices/example\0ACTION=add\0SUBSYSTEM=hidraw\0"
-        b"DEVNAME=hidraw9\0"
+        b"add@/devices/example\0ACTION=add\0SUBSYSTEM=hidraw\0DEVNAME=hidraw9\0"
     )
 
     assert event == {

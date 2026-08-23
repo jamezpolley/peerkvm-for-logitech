@@ -63,9 +63,7 @@ class FlowTUIApp(App):
         status panel."""
         self._run_on_ui_thread(self.query_one(StatusPanel).update, renderable)
 
-    def _run_on_ui_thread(
-        self, callback: Callable[..., object], *args: object
-    ) -> None:
+    def _run_on_ui_thread(self, callback: Callable[..., object], *args: object) -> None:
         """Run directly on Textual's thread, or marshal calls made elsewhere."""
         if threading.get_ident() == self._ui_thread_id:
             callback(*args)

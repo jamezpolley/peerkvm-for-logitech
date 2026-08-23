@@ -218,9 +218,7 @@ class FlowNode:
                 message.hostname,
                 message.target_host,
             )
-            self.devices.switch_connected(
-                self.config.follower_ids, message.target_host
-            )
+            self.devices.switch_connected(self.config.follower_ids, message.target_host)
         self._changed()
 
     def _invalid_packet(self, address: str, error: Exception) -> None:

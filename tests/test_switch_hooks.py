@@ -42,14 +42,13 @@ def test_runs_commands_with_host_environment_in_order(monkeypatch):
 
 def test_ignores_repeated_host_state(monkeypatch):
     calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+
     monkeypatch.setattr(switch_hooks.threading, "Thread", ImmediateThread)
-    monkeypatch.setattr(
-        switch_hooks.subprocess,
-        "run",
-        lambda command, **kwargs: (
-            calls.append(command) or SimpleNamespace(returncode=0)
-        ),
-    )
+    monkeypatch.setattr(switch_hooks.subprocess, "run", run)
     runner = SwitchHookRunner(["command"], local_host=1)
 
     assert runner.trigger(2) is True

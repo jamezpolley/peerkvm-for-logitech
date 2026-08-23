@@ -113,9 +113,7 @@ class Ddcutil:
         return monitors
 
     def capabilities(self, monitor: Monitor) -> MonitorCapabilities:
-        result = self._run(
-            "capabilities", "--bus", str(monitor.bus), "--verbose"
-        )
+        result = self._run("capabilities", "--bus", str(monitor.bus), "--verbose")
         capabilities = parse_capabilities_output(result.stdout)
         if not capabilities.input_sources:
             detail = result.stderr.strip() or "Feature 0x60 has no advertised values"

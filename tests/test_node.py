@@ -1,3 +1,4 @@
+from typing import cast
 from unittest.mock import Mock
 
 from logitech_flow_kvm.monitors import Monitor
@@ -20,7 +21,7 @@ def test_local_leader_connection_announces_this_host():
 
     node._device_connected("KEYS-LOCAL")
 
-    sent = node.transport.send.call_args.args[0]
+    sent = cast(Mock, node.transport.send).call_args.args[0]
     assert sent.target_host == 2
 
 
@@ -29,7 +30,7 @@ def test_follower_connection_does_not_announce_a_host_change():
 
     node._device_connected("MOUSE-LOCAL")
 
-    node.transport.send.assert_not_called()
+    cast(Mock, node.transport.send).assert_not_called()
 
 
 def test_remote_target_switches_only_configured_local_followers():
@@ -38,7 +39,9 @@ def test_remote_target_switches_only_configured_local_followers():
 
     node._message(message, "192.168.0.33")
 
-    node.devices.switch_connected.assert_called_once_with(["MOUSE-LOCAL"], 3)
+    cast(Mock, node.devices.switch_connected).assert_called_once_with(
+        ["MOUSE-LOCAL"], 3
+    )
     assert node.peers["birch"].address == "192.168.0.33"
 
 
@@ -50,14 +53,12 @@ def test_own_broadcast_is_ignored():
 
     node._message(message, "192.168.0.32")
 
-    node.devices.switch_connected.assert_not_called()
+    cast(Mock, node.devices.switch_connected).assert_not_called()
 
 
 def test_invalid_secret_problem_is_visible_in_status():
     changed = Mock()
-    node = FlowNode(
-        NodeConfig(2, "KEYS", ["MOUSE"]), "secret", on_change=changed
-    )
+    node = FlowNode(NodeConfig(2, "KEYS", ["MOUSE"]), "secret", on_change=changed)
 
     node._invalid_packet("192.168.0.33", ValueError("shared secrets differ"))
 
