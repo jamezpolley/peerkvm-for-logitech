@@ -64,6 +64,23 @@ class TestFlowTUIApp:
 
         run(body())
 
+    def test_on_start_may_log_and_update_status_from_the_ui_thread(self):
+        logger = logging.getLogger("test-flow-tui-app-ui-thread")
+        logger.setLevel(logging.INFO)
+
+        async def body():
+            def on_start(app: FlowTUIApp) -> None:
+                logger.info("starting on the UI thread")
+                app.update_status("started")
+
+            app = FlowTUIApp("flow-node", on_start=on_start)
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                panel = app.query_one(StatusPanel)
+                assert "started" in str(panel.render())
+
+        run(body())
+
     def test_the_log_handler_is_detached_on_unmount(self):
         async def body():
             app = FlowTUIApp("flow-server", on_start=lambda a: None)

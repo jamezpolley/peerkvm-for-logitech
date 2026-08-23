@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -17,14 +18,12 @@ from .widgets import StatusPanel
 
 
 class FlowTUIApp(App):
-    """Shared shell for flow-server/flow-client: a status panel on top, a
-    scrolling log panel below.
+    """Shared runtime shell: a status panel above a scrolling log panel.
 
     Textual's event loop must be live before any foreign thread can call
     `call_from_thread` on this app -- so background work (Flask, the
     reconciler, notification listeners, ...) is started from `on_start`,
-    which is invoked once `on_mount` confirms the app is actually running,
-    rather than before `App.run()` is called.
+    which is invoked once `on_mount` confirms the app is actually running.
     """
 
     CSS_PATH = Path(__file__).parent / "app.tcss"
@@ -34,16 +33,18 @@ class FlowTUIApp(App):
         self.title = title
         self._on_start = on_start
         self._log_handler: logging.Handler | None = None
+        self._ui_thread_id: int | None = None
 
     def compose(self) -> ComposeResult:
         yield StatusPanel(id="status-panel")
         yield RichLog(id="log-panel", markup=True, wrap=True)
 
     def on_mount(self) -> None:
+        self._ui_thread_id = threading.get_ident()
         log_panel = self.query_one(RichLog)
 
         def sink(line: str) -> None:
-            self.call_from_thread(log_panel.write, line)
+            self._run_on_ui_thread(log_panel.write, line)
 
         handler = TextualLogHandler(sink)
         handler.setFormatter(logging.Formatter(LOG_FORMAT))
@@ -60,7 +61,16 @@ class FlowTUIApp(App):
     def update_status(self, renderable: RenderableType) -> None:
         """Thread-safe: call from any background thread to refresh the
         status panel."""
-        self.call_from_thread(self.query_one(StatusPanel).update, renderable)
+        self._run_on_ui_thread(self.query_one(StatusPanel).update, renderable)
+
+    def _run_on_ui_thread(
+        self, callback: Callable[..., object], *args: object
+    ) -> None:
+        """Run directly on Textual's thread, or marshal calls made elsewhere."""
+        if threading.get_ident() == self._ui_thread_id:
+            callback(*args)
+        else:
+            self.call_from_thread(callback, *args)
 
     def request_pairing_code(self, remote_addr: str) -> str | None:
         """Thread-safe: call from the Flask request thread to show the
