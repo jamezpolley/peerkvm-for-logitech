@@ -1,3 +1,4 @@
+from .discovery import find_direct_devices
 from .discovery import find_receivers
 from .exceptions import DeviceUnreachable
 from .exceptions import HidppError
@@ -7,14 +8,20 @@ from .exceptions import ReceiverNotFound
 from .listener import NotificationListener
 from .manager import ReceiverManager
 from .models import ChangeHostInfo
+from .models import DirectDeviceInfo
 from .models import Notification
 from .models import ReceiverInfo
+from .receiver import DeviceEndpoint
+from .receiver import DirectDevice
 from .receiver import PairedDevice
 from .receiver import Receiver
 
 __all__ = [
     "ChangeHostInfo",
     "DeviceUnreachable",
+    "DirectDevice",
+    "DirectDeviceInfo",
+    "DeviceEndpoint",
     "HidppError",
     "NoSuchDevice",
     "Notification",
@@ -26,4 +33,5 @@ __all__ = [
     "ReceiverManager",
     "ReceiverNotFound",
     "find_receivers",
+    "find_direct_devices",
 ]

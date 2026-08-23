@@ -21,10 +21,13 @@ from . import constants
 from .exceptions import CannotChangeHost
 from .exceptions import DeviceNotFound
 from .exceptions import NoCertificateAvailable
+from .hidpp import DeviceEndpoint
 from .hidpp import DeviceUnreachable
+from .hidpp import DirectDevice
 from .hidpp import PairedDevice
 from .hidpp import ProtocolError
 from .hidpp import Receiver
+from .hidpp import find_direct_devices
 from .hidpp import find_receivers
 
 
@@ -77,6 +80,8 @@ def get_theoretical_max_device_count() -> int:
         with Receiver(info) as receiver:
             max_count += receiver.max_devices
 
+    max_count += len(find_direct_devices())
+
     return max_count
 
 
@@ -84,14 +89,17 @@ def get_devices() -> Iterable[PairedDevice | None]:
     # Receivers opened here are intentionally left open for the lifetime of
     # the process: callers (e.g. flow_server's leader/follower devices) keep
     # using `device.receiver` afterward to enable notifications and switch hosts.
-    for info in find_receivers():
-        receiver = Receiver(info)
+    for receiver_info in find_receivers():
+        receiver = Receiver(receiver_info)
         for number in range(1, receiver.max_devices + 1):
             yield receiver.get_device(number)
+    for direct_info in find_direct_devices():
+        direct_device = DirectDevice(direct_info)
+        yield direct_device.get_device()
 
 
 def resolve_devices(
-    receivers: Iterable[Receiver], device_ids: Iterable[str]
+    receivers: Iterable[DeviceEndpoint], device_ids: Iterable[str]
 ) -> dict[str, PairedDevice]:
     """Resolve each id in `device_ids` to a `PairedDevice` on `receivers`.
 
@@ -115,6 +123,13 @@ def resolve_devices(
 
 
 def get_device_by_path(device_path: str) -> PairedDevice:
+    for direct_info in find_direct_devices():
+        if direct_info.path == device_path:
+            direct_device = DirectDevice(direct_info)
+            found = direct_device.get_device()
+            assert found is not None
+            return found
+
     if ":" not in device_path:
         raise DeviceNotFound(device_path)
 
@@ -124,15 +139,15 @@ def get_device_by_path(device_path: str) -> PairedDevice:
     except ValueError:
         raise DeviceNotFound(device_path) from None
 
-    for info in find_receivers():
-        if info.path != receiver_path:
+    for receiver_info in find_receivers():
+        if receiver_info.path != receiver_path:
             continue
-        receiver = Receiver(info)
-        device = receiver.get_device(number)
-        if device is None:
+        receiver = Receiver(receiver_info)
+        paired_device = receiver.get_device(number)
+        if paired_device is None:
             receiver.close()
             raise DeviceNotFound(device_path)
-        return device
+        return paired_device
 
     raise DeviceNotFound(device_path)
 
@@ -170,6 +185,12 @@ def change_device_host(device: PairedDevice, host: int) -> None:
 
     if info is None or not 1 <= host <= info.num_hosts:
         raise CannotChangeHost(device.id)
+
+    # Writing the already-selected host still makes directly-connected
+    # Bluetooth devices disconnect and reconnect.  Besides being needless,
+    # that would turn every presence event into an endless reconnect loop.
+    if info.current_host == host - 1:
+        return
 
     device.receiver.set_current_host(device.number, info.feature_index, host - 1)
 

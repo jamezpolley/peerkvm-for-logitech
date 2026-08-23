@@ -10,6 +10,12 @@ def _write_uevent(root, name: str, lines: list[str]) -> None:
         f.write("\n".join(lines) + "\n")
 
 
+def _write_report_descriptor(root, name: str, descriptor: bytes) -> None:
+    device_dir = os.path.join(root, name, "device")
+    with open(os.path.join(device_dir, "report_descriptor"), "wb") as f:
+        f.write(descriptor)
+
+
 class TestParseInterfaceNumber:
     def test_extracts_trailing_interface_digits(self):
         assert discovery._parse_interface_number("usb-0000:00:14.0-5.1.4/input2") == 2
@@ -61,6 +67,40 @@ class TestFindReceivers:
 
         assert discovery.find_receivers() == []
 
+
+class TestFindDirectDevices:
+    def test_finds_logitech_bluetooth_device_with_long_hidpp_report(
+        self, tmp_path, monkeypatch
+    ):
+        _write_uevent(
+            str(tmp_path),
+            "hidraw2",
+            [
+                "HID_ID=0005:0000046D:0000B369",
+                "HID_NAME=MX Keys Mini",
+                "HID_UNIQ=d7:c3:34:36:65:db",
+            ],
+        )
+        _write_report_descriptor(str(tmp_path), "hidraw2", b"\x06\x43\xff\x85\x11")
+        monkeypatch.setattr(discovery, "HIDRAW_SYSFS_GLOB", str(tmp_path / "hidraw*"))
+
+        devices = discovery.find_direct_devices()
+
+        assert len(devices) == 1
+        assert devices[0].path == "/dev/hidraw2"
+        assert devices[0].product_id == 0xB369
+        assert devices[0].name == "MX Keys Mini"
+        assert devices[0].serial == "d7:c3:34:36:65:db"
+
+    def test_ignores_bluetooth_device_without_hidpp_report(self, tmp_path, monkeypatch):
+        _write_uevent(str(tmp_path), "hidraw3", ["HID_ID=0005:0000046D:0000B369"])
+        _write_report_descriptor(str(tmp_path), "hidraw3", b"\x05\x01\x85\x01")
+        monkeypatch.setattr(discovery, "HIDRAW_SYSFS_GLOB", str(tmp_path / "hidraw*"))
+
+        assert discovery.find_direct_devices() == []
+
+
+class TestFindReceiversContinued:
     def test_ignores_non_logitech_vendor(self, tmp_path, monkeypatch):
         _write_uevent(
             str(tmp_path),

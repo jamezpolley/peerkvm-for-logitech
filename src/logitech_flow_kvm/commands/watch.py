@@ -6,6 +6,7 @@ from rich.console import Console
 from ..hidpp import Notification
 from ..hidpp import NotificationListener
 from ..hidpp import PairedDevice
+from ..hidpp import Receiver
 from ..util import get_device_by_path
 from ..util import parse_connection_status
 from . import LogitechFlowKvmCommand
@@ -59,6 +60,10 @@ class Watch(LogitechFlowKvmCommand):
         )
         self.console.print("[bold]Press CTRL+C to exit")
 
+        if not isinstance(device.receiver, Receiver):
+            raise ValueError(
+                "watch does not yet support directly-connected Bluetooth devices"
+            )
         device.receiver.enable_connection_notifications()
         listener = NotificationListener(device.receiver.path, self.callback)
         listener.start()

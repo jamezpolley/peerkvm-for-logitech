@@ -38,6 +38,14 @@ Requires Python 3.10 or later.
 pip install logitech-flow-kvm
 ```
 
+To control Bluetooth-connected devices, install the included udev rule and
+then reconnect the device (or reboot):
+
+```
+sudo install -m 0644 rules.d/42-logitech-flow-kvm.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+```
+
 You can also install the in-development version with:
 
 ```
@@ -100,6 +108,29 @@ On the other computers you'd like to use this feature with, you can run the foll
 If this is your first time connecting to this server, you will be walked through a brief pairing process for establishing a secure connection between your server and client instances: the client displays a pairing code, and you enter it on the server -- as a popup in `flow-server`'s display if it's running in a terminal, or as an ordinary prompt if it's running non-interactively.  Afterward, the client will connect, gather some configuration options from the server, and will instruct your "follower" devices to change their hosts as necessary in the future.
 
 Like `flow-server`, `flow-client` shows the same kind of interactive display (device/leader status on top, a scrolling log below) when run in a terminal, and falls back to plain logging otherwise.
+
+## Running commands when the active host changes
+
+Both `flow-server` and `flow-client` accept repeatable
+`--on-switch-execute COMMAND` options. Commands run locally, in the order given,
+without blocking device switching. For example, a monitor input command can be
+selected from the destination host:
+
+```
+logitech-flow-kvm flow-client \
+  --on-switch-execute 'monitor-input "$LOGITECH_FLOW_TARGET_HOST"' \
+  2 flow-server.local
+```
+
+Each command receives these environment variables:
+
+- `LOGITECH_FLOW_LOCAL_HOST`: this process's configured host number
+- `LOGITECH_FLOW_PREVIOUS_HOST`: the previously observed host, or empty on startup
+- `LOGITECH_FLOW_TARGET_HOST`: the newly active host
+
+The hook also runs for the initial host state so external hardware is synchronized
+after a process restart. Repeated reports of the same host do not rerun it. A
+failed command is logged and does not stop Flow or later hooks.
 
 # How to
 

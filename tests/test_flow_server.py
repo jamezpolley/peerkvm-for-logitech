@@ -118,6 +118,13 @@ class TestReportLeaderHost:
 
         assert app.reconciler._wake.is_set()
 
+    def test_triggers_switch_hooks(self, app):
+        app.switch_hooks = Mock()
+
+        app.report_leader_host(3)
+
+        app.switch_hooks.trigger.assert_called_once_with(3)
+
     def test_desired_host_is_none_before_any_report(self, app):
         assert app._get_desired_host() is None
 

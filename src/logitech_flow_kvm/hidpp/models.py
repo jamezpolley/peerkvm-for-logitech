@@ -24,6 +24,18 @@ class ReceiverInfo:
 
 
 @dataclasses.dataclass(frozen=True)
+class DirectDeviceInfo:
+    """A Logitech HID++ device connected directly over Bluetooth or USB."""
+
+    path: str
+    product_id: int
+    name: str | None
+    serial: str | None
+    bus_id: int
+    hidpp_long: bool
+
+
+@dataclasses.dataclass(frozen=True)
 class ChangeHostInfo:
     feature_index: int
     num_hosts: int

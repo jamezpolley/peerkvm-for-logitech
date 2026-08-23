@@ -5,6 +5,7 @@ import dataclasses
 from .exceptions import ProtocolError
 from .models import DEVICE_KIND
 from .models import ChangeHostInfo
+from .models import DirectDeviceInfo
 from .models import ReceiverInfo
 from .protocol import RECEIVER_DEVNUMBER
 from .protocol import HidppConnection
@@ -45,7 +46,7 @@ def _decode_codename(raw: bytes, *, length_offset: int, text_offset: int) -> str
 class PairedDevice:
     """A device paired with a receiver, as reported by its pairing registers."""
 
-    receiver: Receiver
+    receiver: Receiver | DirectDevice
     number: int
     wpid: str
     kind: str
@@ -58,6 +59,8 @@ class PairedDevice:
 
     @property
     def path(self) -> str:
+        if self.receiver.kind == "bluetooth":
+            return self.receiver.path
         return f"{self.receiver.path}:{self.number}"
 
 
@@ -237,3 +240,88 @@ class Receiver:
         self._conn.write_register(
             RECEIVER_DEVNUMBER, RECEIVER_CONNECTION_REGISTER, bytes([0x02])
         )
+
+
+class DirectDevice:
+    """A directly-connected Bluetooth HID++ device.
+
+    Direct devices have no receiver pairing table.  HID++ addresses the device
+    as 0xFF and Bluetooth exposes the long report only.
+    """
+
+    def __init__(
+        self, info: DirectDeviceInfo, *, transport: Transport | None = None
+    ) -> None:
+        self.path = info.path
+        self.kind = "bluetooth"
+        self.product_id = info.product_id
+        self.max_devices = 1
+        self._io: HidRawIO | None = None
+        self._conn = (
+            HidppConnection(transport, force_long=info.hidpp_long)
+            if transport is not None
+            else None
+        )
+        self._force_long = info.hidpp_long
+        self._device = PairedDevice(
+            receiver=self,
+            number=RECEIVER_DEVNUMBER,
+            wpid=f"{info.product_id:04X}",
+            kind="unknown",
+            serial=info.serial.upper() if info.serial else None,
+            codename=info.name,
+        )
+
+    def close(self) -> None:
+        if self._io is not None:
+            self._io.close()
+
+    def _connection(self) -> HidppConnection:
+        if self._conn is None:
+            self._io = HidRawIO(self.path)
+            self._conn = HidppConnection(self._io, force_long=self._force_long)
+        return self._conn
+
+    def __enter__(self) -> DirectDevice:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def get_device(self, number: int = RECEIVER_DEVNUMBER) -> PairedDevice | None:
+        if number in (1, RECEIVER_DEVNUMBER):
+            return self._device
+        return None
+
+    def enumerate_devices(self) -> list[PairedDevice]:
+        return [self._device]
+
+    def ping_device(
+        self, number: int = RECEIVER_DEVNUMBER, *, timeout: float = 1.5
+    ) -> float | None:
+        return self._connection().ping(number, timeout=timeout)
+
+    def get_change_host_info(self, number: int) -> ChangeHostInfo | None:
+        connection = self._connection()
+        feature_index = connection.get_feature_index(number, FEATURE_CHANGE_HOST)
+        if feature_index is None:
+            return None
+        reply = connection.request(
+            number, (feature_index << 8) | CHANGE_HOST_READ_FUNCTION
+        )
+        if not reply or len(reply) < 2:
+            return None
+        return ChangeHostInfo(
+            feature_index=feature_index, num_hosts=reply[0], current_host=reply[1]
+        )
+
+    def set_current_host(self, number: int, feature_index: int, host: int) -> None:
+        self._connection().request(
+            number,
+            (feature_index << 8) | CHANGE_HOST_WRITE_FUNCTION,
+            bytes([host]),
+            no_reply=True,
+        )
+
+
+DeviceEndpoint = Receiver | DirectDevice

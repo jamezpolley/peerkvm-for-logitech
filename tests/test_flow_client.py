@@ -521,11 +521,13 @@ class TestHandleEvent:
     def test_leader_host_updates_state_and_pokes_the_reconciler(self):
         reconciler = Mock()
         client = make_client(reconciler=reconciler)
+        client.switch_hooks = Mock()
 
         client._handle_event("leader-host", "3")
 
         assert client.leader_host == 3
         reconciler.poke.assert_called_once()
+        client.switch_hooks.trigger.assert_called_once_with(3)
 
     def test_host_connected_only_prints(self):
         reconciler = Mock()

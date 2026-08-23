@@ -26,7 +26,7 @@ def env(monkeypatch):
     plain path strings, which `FakeReceiver` accepts in place of a
     `ReceiverInfo`.
     """
-    env = SimpleNamespace(log=[], listeners=[], discovered=[])
+    env = SimpleNamespace(log=[], listeners=[], discovered=[], direct_discovered=[])
 
     class FakeReceiver:
         def __init__(self, path):
@@ -54,10 +54,27 @@ def env(monkeypatch):
         def stop(self):
             env.log.append(("listener-stop", self.path))
 
+    class FakeDirectDevice:
+        def __init__(self, path):
+            self.path = path
+            self.device = SimpleNamespace(id="DIRECT01", receiver=self)
+            env.log.append(("open-direct", path))
+
+        def get_device(self):
+            return self.device
+
+        def close(self):
+            env.log.append(("close-direct", self.path))
+
     monkeypatch.setattr(manager_module, "Receiver", FakeReceiver)
+    monkeypatch.setattr(manager_module, "DirectDevice", FakeDirectDevice)
     monkeypatch.setattr(manager_module, "NotificationListener", FakeListener)
     monkeypatch.setattr(manager_module, "find_receivers", lambda: list(env.discovered))
+    monkeypatch.setattr(
+        manager_module, "find_direct_devices", lambda: list(env.direct_discovered)
+    )
     env.FakeReceiver = FakeReceiver
+    env.FakeDirectDevice = FakeDirectDevice
     return env
 
 
@@ -152,6 +169,37 @@ class TestRecovery:
         stop_and_join(manager)
 
         assert len(rebinds) == 2
+
+    def test_reports_direct_device_presence_and_rebinds_new_hidraw_path(self, env):
+        presence = []
+        rebinds: list[list] = []
+        direct = env.FakeDirectDevice("d0")
+        manager = ReceiverManager(
+            [direct],
+            rebind=rebinds.append,
+            callback=lambda endpoint, notification: None,
+            presence_callback=lambda device, connected: presence.append(
+                (device.id, connected)
+            ),
+            rediscovery_interval=0.01,
+        )
+
+        manager.start()
+        wait_for(lambda: presence == [("DIRECT01", True)])
+
+        env.direct_discovered = ["d1"]
+        env.listeners[0].on_disconnect()
+
+        wait_for(lambda: presence[-1:] == [("DIRECT01", True)] and len(presence) == 3)
+        stop_and_join(manager)
+
+        assert presence == [
+            ("DIRECT01", True),
+            ("DIRECT01", False),
+            ("DIRECT01", True),
+        ]
+        assert len(rebinds) == 1
+        assert [endpoint.path for endpoint in rebinds[0]] == ["d1"]
 
 
 class TestStop:

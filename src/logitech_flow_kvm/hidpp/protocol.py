@@ -63,8 +63,9 @@ def make_notification(
 class HidppConnection:
     """Request/reply and ping logic for HID++1.0/2.0, layered over a raw transport."""
 
-    def __init__(self, transport: Transport):
+    def __init__(self, transport: Transport, *, force_long: bool = False):
         self._transport = transport
+        self._force_long = force_long
         # Serializes drain+write+read cycles across threads sharing this
         # connection (e.g. a Flask request thread and another caller both
         # acting on the same receiver) so one call can't consume another's
@@ -96,7 +97,9 @@ class HidppConnection:
 
         with self._lock:
             self._transport.drain()
-            self._transport.write(devnumber, request_header + params, long_message)
+            self._transport.write(
+                devnumber, request_header + params, long_message or self._force_long
+            )
 
             if no_reply:
                 return None
@@ -156,7 +159,7 @@ class HidppConnection:
         with self._lock:
             self._transport.drain()
             self._transport.write(
-                devnumber, request_header + params, long_message=False
+                devnumber, request_header + params, long_message=self._force_long
             )
 
             deadline = time.monotonic() + timeout
