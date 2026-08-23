@@ -1,9 +1,16 @@
-![header-image](http://coddingtonbear-public.s3.amazonaws.com/github/logitech-flow-kvm/mx_keys_buttons.jpg)
+![PeerKVM for Logitech](docs/assets/img/peerkvm.jpeg)
 
-[![PyPI version](https://img.shields.io/pypi/v/logitech-flow-kvm.svg)](https://pypi.org/project/logitech-flow-kvm/)
-[![Python versions](https://img.shields.io/pypi/pyversions/logitech-flow-kvm.svg)](https://pypi.org/project/logitech-flow-kvm/)
+# PeerKVM for Logitech
+
 [![CI](https://github.com/coddingtonbear/logitech-flow-kvm/actions/workflows/ci.yml/badge.svg)](https://github.com/coddingtonbear/logitech-flow-kvm/actions/workflows/ci.yml)
-[![License](https://img.shields.io/pypi/l/logitech-flow-kvm.svg)](https://github.com/coddingtonbear/logitech-flow-kvm/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+> [!IMPORTANT]
+> **PeerKVM for Logitech is an independent, unofficial project. It is not
+> affiliated with, endorsed by, or supported by Logitech.** This project is a
+> derivative of Adam Coddington's original
+> [`logitech-flow-kvm`](https://github.com/coddingtonbear/logitech-flow-kvm),
+> whose MIT-licensed history and attribution are preserved.
 
 Logitech's "Flow" lets your mouse and keyboard roam across multiple paired hosts with a single keypress -- but Logitech only supports it between Windows and macOS. `logitech-flow-kvm` brings that same one-keypress host switching to Linux, and keeps your clipboard in sync across hosts while it's at it.
 
@@ -259,4 +266,15 @@ It's capped at 5MB, rotating through up to 5 backups (`logitech-flow-kvm.log.1`,
 
 # Credits
 
-This tool's HID++ implementation was developed with reference to the protocol knowledge documented by the folks working on [Solaar](https://github.com/pwr-Solaar/Solaar).
+PeerKVM for Logitech is derived from Adam Coddington's original
+[`logitech-flow-kvm`](https://github.com/coddingtonbear/logitech-flow-kvm).
+We gratefully preserve its MIT-licensed history and attribution. This fork has
+since evolved into a substantially different peer-to-peer product, but it
+would not exist without that original work.
+
+This project is independent and unofficial. It is not affiliated with,
+endorsed by, or supported by Logitech.
+
+The HID++ implementation was also developed with reference to the protocol
+knowledge documented by the contributors to
+[Solaar](https://github.com/pwr-Solaar/Solaar).
