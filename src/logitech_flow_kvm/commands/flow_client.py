@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from argparse import ArgumentParser
+from argparse import ArgumentTypeError
 from collections.abc import Callable
 from typing import Literal
 
@@ -63,6 +64,18 @@ EVENTS_READ_TIMEOUT = 45.0
 # POST /pairing blocks until a human types the pairing code into the server
 # console; give them plenty of time.
 PAIRING_READ_TIMEOUT = 600.0
+
+
+def parse_device_id_map(value: str) -> tuple[str, str]:
+    """Parse a server-id=local-id mapping supplied on the command line."""
+    server_id, separator, local_id = value.partition("=")
+    server_id = server_id.strip()
+    local_id = local_id.strip()
+    if not separator or not server_id or not local_id:
+        raise ArgumentTypeError(
+            "expected SERVER_ID=LOCAL_ID (for example, ABC123=DEF456)"
+        )
+    return server_id, local_id
 
 
 class FlowClient(LogitechFlowKvmCommand):
@@ -125,6 +138,28 @@ class FlowClient(LogitechFlowKvmCommand):
                 "LOGITECH_FLOW_{LOCAL,PREVIOUS,TARGET}_HOST."
             ),
         )
+        parser.add_argument(
+            "--device-id-map",
+            action="append",
+            default=[],
+            type=parse_device_id_map,
+            metavar="SERVER_ID=LOCAL_ID",
+            help=(
+                "Map a device ID reported by the server to the ID of the same "
+                "device on this client. May be specified more than once. This "
+                "is useful for Bluetooth devices whose IDs differ by host."
+            ),
+        )
+
+    def _device_id_map(self) -> dict[str, str]:
+        mappings: dict[str, str] = {}
+        for server_id, local_id in getattr(self.options, "device_id_map", []):
+            if server_id in mappings and mappings[server_id] != local_id:
+                raise ValueError(
+                    f"Conflicting local IDs configured for server device {server_id}"
+                )
+            mappings[server_id] = local_id
+        return mappings
 
     def _find_follower(
         self, receiver: DeviceEndpoint, devnumber: int
@@ -417,10 +452,25 @@ class FlowClient(LogitechFlowKvmCommand):
         result.raise_for_status()
 
         response = result.json()
-        self.leader_id = response["leader"]
-        self.follower_ids = response["followers"]
+        device_id_map = self._device_id_map()
+        server_device_ids = {response["leader"], *response["followers"]}
+        unknown_ids = set(device_id_map) - server_device_ids
+        if unknown_ids:
+            unknown = ", ".join(sorted(unknown_ids))
+            raise ValueError(f"Device ID map refers to unknown server IDs: {unknown}")
 
-        device_id_map: dict[str, PairedDevice | None] = {
+        self.leader_id = device_id_map.get(response["leader"], response["leader"])
+        self.follower_ids = [
+            device_id_map.get(follower_id, follower_id)
+            for follower_id in response["followers"]
+        ]
+
+        for server_id, local_id in device_id_map.items():
+            logger.info(
+                "Mapping server device %s to local device %s", server_id, local_id
+            )
+
+        found_device_map: dict[str, PairedDevice | None] = {
             follower: None for follower in self.follower_ids
         }
         self.local_receivers = []
@@ -433,19 +483,22 @@ class FlowClient(LogitechFlowKvmCommand):
                 receiver = Receiver(receiver_info)
                 self.local_receivers.append(receiver)
                 for device in receiver.enumerate_devices():
-                    if device.serial in device_id_map:
-                        device_id_map[device.serial] = device
+                    if device.serial in found_device_map:
+                        found_device_map[device.serial] = device
                 progress.advance(enumerate_task, receiver.max_devices)
             for direct_info in find_direct_devices():
                 device_endpoint = DirectDevice(direct_info)
                 direct_device = device_endpoint.get_device()
-                if direct_device is not None and direct_device.serial in device_id_map:
-                    device_id_map[direct_device.serial] = direct_device
+                if (
+                    direct_device is not None
+                    and direct_device.serial in found_device_map
+                ):
+                    found_device_map[direct_device.serial] = direct_device
                     self.local_receivers.append(device_endpoint)
                 progress.advance(enumerate_task)
 
         self.follower_devices = []
-        for follower_id, found_device in device_id_map.items():
+        for follower_id, found_device in found_device_map.items():
             if found_device is None:
                 raise exceptions.DeviceNotFound(follower_id)
             self.follower_devices.append(found_device)

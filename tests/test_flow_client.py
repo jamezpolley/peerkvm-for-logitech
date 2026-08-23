@@ -12,6 +12,7 @@ import requests
 from logitech_flow_kvm import exceptions
 from logitech_flow_kvm.commands import flow_client
 from logitech_flow_kvm.commands.flow_client import FlowClient
+from logitech_flow_kvm.commands.flow_client import parse_device_id_map
 from logitech_flow_kvm.hidpp.models import Notification
 from logitech_flow_kvm.util import set_host_certificate_and_token
 
@@ -79,6 +80,31 @@ def run_queued_http_tasks(client: FlowClient) -> None:
         except queue.Empty:
             return
         task()
+
+
+class TestDeviceIdMap:
+    def test_parses_server_and_local_ids(self):
+        assert parse_device_id_map("SERVER01=LOCAL01") == ("SERVER01", "LOCAL01")
+
+    @pytest.mark.parametrize("value", ["SERVER01", "=LOCAL01", "SERVER01="])
+    def test_rejects_incomplete_mappings(self, value):
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_device_id_map(value)
+
+    def test_builds_multiple_mappings(self):
+        client = FlowClient(
+            options=argparse.Namespace(
+                host_number=2,
+                server="myserver",
+                port=24801,
+                device_id_map=[("SERVER01", "LOCAL01"), ("SERVER02", "LOCAL02")],
+            )
+        )
+
+        assert client._device_id_map() == {
+            "SERVER01": "LOCAL01",
+            "SERVER02": "LOCAL02",
+        }
 
 
 class TestBuildUrl:

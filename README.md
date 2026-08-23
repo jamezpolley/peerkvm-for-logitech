@@ -109,6 +109,23 @@ If this is your first time connecting to this server, you will be walked through
 
 Like `flow-server`, `flow-client` shows the same kind of interactive display (device/leader status on top, a scrolling log below) when run in a terminal, and falls back to plain logging otherwise.
 
+### Mapping device IDs that differ between hosts
+
+Some Bluetooth devices are reported with a different ID on each host. If the
+server reports (for example) `D7:8E:D4:61:21:EC`, while `list-devices` on the
+client reports the same physical device as `D7:8E:D4:61:21:EB`, map the IDs when
+starting that client:
+
+```
+logitech-flow-kvm flow-client \
+  --device-id-map D7:8E:D4:61:21:EC=D7:8E:D4:61:21:EB \
+  2 flow-server.local
+```
+
+The option may be repeated when multiple device IDs differ. It applies to both
+leader and follower devices; IDs not explicitly mapped retain their server
+value.
+
 ## Running commands when the active host changes
 
 Both `flow-server` and `flow-client` accept repeatable
