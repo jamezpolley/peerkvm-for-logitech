@@ -1,11 +1,14 @@
 import base64
 import hashlib
 import json
+import math
 import os
+import secrets
 import socket
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -16,6 +19,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 PROTOCOL_VERSION = 1
 MAX_PACKET_SIZE = 65507
+MIN_PADDING_BYTES = 256
+MAX_PADDING_BYTES = 1024
+MAX_PACKET_AGE_SECONDS = 30.0
+MAX_FUTURE_SKEW_SECONDS = 5.0
+REPLAY_CACHE_TTL_SECONDS = 60.0
+MAX_REPLAY_CACHE_ENTRIES = 4096
 
 
 @dataclass(frozen=True)
@@ -38,16 +47,68 @@ class NodeAdvertisement:
     clipboard: str | None = None
 
 
+@dataclass(frozen=True)
+class DecodedPacket:
+    message_id: str
+    sent_at: float
+    advertisement: NodeAdvertisement
+
+
+class ReplayRejected(ValueError):
+    """An authenticated packet was stale, premature, or already received."""
+
+
+class ReplayGuard:
+    def __init__(
+        self,
+        *,
+        max_age: float = MAX_PACKET_AGE_SECONDS,
+        max_future_skew: float = MAX_FUTURE_SKEW_SECONDS,
+        cache_ttl: float = REPLAY_CACHE_TTL_SECONDS,
+        max_entries: int = MAX_REPLAY_CACHE_ENTRIES,
+    ):
+        self.max_age = max_age
+        self.max_future_skew = max_future_skew
+        self.cache_ttl = cache_ttl
+        self.max_entries = max_entries
+        self._seen: OrderedDict[str, float] = OrderedDict()
+
+    def accept(self, packet: DecodedPacket, *, now: float | None = None) -> None:
+        current_time = time.time() if now is None else now
+        while self._seen:
+            _, expires_at = next(iter(self._seen.items()))
+            if expires_at > current_time:
+                break
+            self._seen.popitem(last=False)
+
+        if packet.sent_at < current_time - self.max_age:
+            raise ReplayRejected("packet is too old")
+        if packet.sent_at > current_time + self.max_future_skew:
+            raise ReplayRejected("packet timestamp is too far in the future")
+        if packet.message_id in self._seen:
+            raise ReplayRejected("packet has already been received")
+
+        self._seen[packet.message_id] = current_time + self.cache_ttl
+        while len(self._seen) > self.max_entries:
+            self._seen.popitem(last=False)
+
+
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
 def encode_packet(advertisement: NodeAdvertisement, secret: str) -> bytes:
+    padding_size = MIN_PADDING_BYTES + secrets.randbelow(
+        MAX_PADDING_BYTES - MIN_PADDING_BYTES + 1
+    )
     body = {
         "version": PROTOCOL_VERSION,
         "message_id": str(uuid.uuid4()),
         "sent_at": time.time(),
         "advertisement": asdict(advertisement),
+        # Keep padding inside the authenticated ciphertext so it cannot be
+        # stripped or changed and its contents do not reveal a packet marker.
+        "padding": base64.b64encode(os.urandom(padding_size)).decode(),
     }
     nonce = os.urandom(12)
     key = hashlib.sha256(secret.encode()).digest()
@@ -62,7 +123,7 @@ def encode_packet(advertisement: NodeAdvertisement, secret: str) -> bytes:
     return _canonical_json(packet)
 
 
-def decode_packet(data: bytes, secret: str) -> NodeAdvertisement:
+def _decode_packet(data: bytes, secret: str) -> DecodedPacket:
     packet = json.loads(data)
     if packet.get("version") != PROTOCOL_VERSION:
         raise ValueError(f"unsupported protocol version: {packet.get('version')}")
@@ -78,24 +139,40 @@ def decode_packet(data: bytes, secret: str) -> NodeAdvertisement:
             "packet authentication failed (shared secrets differ)"
         ) from error
     body = json.loads(plaintext)
+    if body.get("version") != PROTOCOL_VERSION:
+        raise ValueError(f"unsupported inner protocol version: {body.get('version')}")
+    message_id = str(body["message_id"])
+    if str(uuid.UUID(message_id)) != message_id:
+        raise ValueError("invalid message ID")
+    sent_at = float(body["sent_at"])
+    if not math.isfinite(sent_at):
+        raise ValueError("invalid packet timestamp")
     advertised = body["advertisement"]
-    return NodeAdvertisement(
-        node_id=str(advertised["node_id"]),
-        hostname=str(advertised["hostname"]),
-        host_number=int(advertised["host_number"]),
-        devices=[DeviceAdvertisement(**device) for device in advertised["devices"]],
-        leader_id=str(advertised["leader_id"]),
-        target_host=(
-            int(advertised["target_host"])
-            if advertised.get("target_host") is not None
-            else None
-        ),
-        clipboard=(
-            str(advertised["clipboard"])
-            if advertised.get("clipboard") is not None
-            else None
+    return DecodedPacket(
+        message_id=message_id,
+        sent_at=sent_at,
+        advertisement=NodeAdvertisement(
+            node_id=str(advertised["node_id"]),
+            hostname=str(advertised["hostname"]),
+            host_number=int(advertised["host_number"]),
+            devices=[DeviceAdvertisement(**device) for device in advertised["devices"]],
+            leader_id=str(advertised["leader_id"]),
+            target_host=(
+                int(advertised["target_host"])
+                if advertised.get("target_host") is not None
+                else None
+            ),
+            clipboard=(
+                str(advertised["clipboard"])
+                if advertised.get("clipboard") is not None
+                else None
+            ),
         ),
     )
+
+
+def decode_packet(data: bytes, secret: str) -> NodeAdvertisement:
+    return _decode_packet(data, secret).advertisement
 
 
 class BroadcastTransport:
@@ -114,6 +191,7 @@ class BroadcastTransport:
         self._stop = threading.Event()
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
+        self._replay_guard = ReplayGuard()
 
     def start(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -147,15 +225,18 @@ class BroadcastTransport:
         while not self._stop.is_set():
             try:
                 data, address = self._socket.recvfrom(MAX_PACKET_SIZE)
-                message = decode_packet(data, self.secret)
+                packet = _decode_packet(data, self.secret)
+                self._replay_guard.accept(packet)
             except TimeoutError:
                 continue
             except OSError:
                 if not self._stop.is_set():
                     raise
                 return
+            except ReplayRejected:
+                continue
             except Exception as error:
                 if self.on_invalid_packet is not None:
                     self.on_invalid_packet(address[0], error)
                 continue
-            self.on_message(message, address[0])
+            self.on_message(packet.advertisement, address[0])
