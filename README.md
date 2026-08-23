@@ -41,10 +41,6 @@ If you'd rather see what it does before reading how to set it up, there's a proj
 
 Requires Python 3.10 or later.
 
-```
-pip install logitech-flow-kvm
-```
-
 To control Bluetooth-connected devices, install the included udev rule and
 then reconnect the device (or reboot):
 
@@ -58,13 +54,7 @@ will run exclusively through SSH or as a service without an active desktop
 session, configure a dedicated group with `MODE="0660"` in the local udev rule
 and run the service as a member of that group.
 
-You can also install the in-development version with:
-
-```
-pip install https://github.com/coddingtonbear/logitech-flow-kvm/archive/main.zip
-```
-
-To run directly from a clone without using `pip install`:
+Run directly from a clone:
 
 ```
 git clone https://github.com/coddingtonbear/logitech-flow-kvm.git
@@ -196,6 +186,15 @@ logitech-flow-kvm flow-node --secret 'the-same-value-on-every-peer'
 
 If no saved configuration exists, the process exits with an instruction to run
 the interactive setup instead of guessing defaults.
+
+Clipboard sharing requires access to the local desktop clipboard provider.
+Start `flow-node` from the local graphical session, or explicitly propagate
+that session's environment when starting it from SSH or a service. Depending
+on the desktop, this includes variables such as `DISPLAY` and `XAUTHORITY` for
+X11, or `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` for Wayland (and, where
+applicable, the session D-Bus environment). If these variables and their
+associated permissions are not available, device switching still works but
+clipboard synchronization cannot read or update the clipboard.
 
 # How to
 
