@@ -35,6 +35,16 @@ class ClientStatus:
     followers: list[DeviceStatus] = field(default_factory=list)
 
 
+@dataclass
+class NodeStatus:
+    hostname: str
+    host_number: int
+    leader_id: str
+    devices: list[DeviceStatus] = field(default_factory=list)
+    peers: list[str] = field(default_factory=list)
+    problem: str | None = None
+
+
 def _device_cell(device: DeviceStatus) -> str:
     state = "[green]connected[/]" if device.connected else "[red]disconnected[/]"
     return f"{device.label} ({device.id}) -- {state}"
@@ -85,6 +95,21 @@ def render_client_status(status: ClientStatus) -> Table:
     for follower in status.followers:
         table.add_row("Follower", _device_cell(follower))
 
+    return table
+
+
+def render_node_status(status: NodeStatus) -> Table:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(justify="right", style="bold")
+    table.add_column()
+    table.add_row("Node", status.hostname)
+    table.add_row("Host", str(status.host_number))
+    table.add_row("Leader", status.leader_id)
+    table.add_row("Peers", ", ".join(status.peers) if status.peers else "searching…")
+    for device in status.devices:
+        table.add_row("Device", _device_cell(device))
+    if status.problem:
+        table.add_row("Problem", f"[red]{status.problem}[/]")
     return table
 
 
