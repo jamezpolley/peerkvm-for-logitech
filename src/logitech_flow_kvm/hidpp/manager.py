@@ -15,9 +15,13 @@ import threading
 from collections.abc import Callable
 from functools import partial
 
+from .discovery import find_direct_devices
 from .discovery import find_receivers
 from .listener import NotificationListener
 from .models import Notification
+from .receiver import DeviceEndpoint
+from .receiver import DirectDevice
+from .receiver import PairedDevice
 from .receiver import Receiver
 
 logger = logging.getLogger(__name__)
@@ -49,15 +53,17 @@ class ReceiverManager(threading.Thread):
 
     def __init__(
         self,
-        receivers: list[Receiver],
-        rebind: Callable[[list[Receiver]], None],
-        callback: Callable[[Receiver, Notification], None],
+        receivers: list[DeviceEndpoint],
+        rebind: Callable[[list[DeviceEndpoint]], None],
+        callback: Callable[[DeviceEndpoint, Notification], None],
+        presence_callback: Callable[[PairedDevice, bool], None] | None = None,
         rediscovery_interval: float = REDISCOVERY_INTERVAL,
     ):
         super().__init__(daemon=True)
         self._receivers = receivers
         self._rebind = rebind
         self._callback = callback
+        self._presence_callback = presence_callback
         self._rediscovery_interval = rediscovery_interval
         self._listeners: list[NotificationListener] = []
         self._lost = threading.Event()
@@ -94,16 +100,29 @@ class ReceiverManager(threading.Thread):
         notifications can be missed.
         """
         for receiver in self._receivers:
-            receiver.enable_connection_notifications()
+            if not isinstance(receiver, DirectDevice):
+                receiver.enable_connection_notifications()
             listener = NotificationListener(
                 receiver.path,
                 partial(self._callback, receiver),
-                on_disconnect=self._lost.set,
+                on_disconnect=partial(self._endpoint_lost, receiver),
             )
             listener.start()
             self._listeners.append(listener)
         for receiver in self._receivers:
-            receiver.notify_devices()
+            if isinstance(receiver, DirectDevice):
+                device = receiver.get_device()
+                if device is not None and self._presence_callback is not None:
+                    self._presence_callback(device, True)
+            else:
+                receiver.notify_devices()
+
+    def _endpoint_lost(self, endpoint: DeviceEndpoint) -> None:
+        if isinstance(endpoint, DirectDevice) and self._presence_callback is not None:
+            device = endpoint.get_device()
+            if device is not None:
+                self._presence_callback(device, False)
+        self._lost.set()
 
     def _teardown(self) -> None:
         for listener in self._listeners:
@@ -126,8 +145,10 @@ class ReceiverManager(threading.Thread):
         while not self._stop_event.is_set():
             self._teardown()
             try:
-                for info in find_receivers():
-                    self._receivers.append(Receiver(info))
+                for receiver_info in find_receivers():
+                    self._receivers.append(Receiver(receiver_info))
+                for direct_info in find_direct_devices():
+                    self._receivers.append(DirectDevice(direct_info))
                 self._rebind(list(self._receivers))
                 self._activate()
             except Exception as error:

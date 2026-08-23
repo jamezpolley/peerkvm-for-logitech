@@ -260,6 +260,18 @@ class TestChangeDeviceHost:
         assert devnumber == 1
         assert payload[2:3] == bytes([1])
 
+    def test_does_not_write_when_device_is_already_on_the_requested_host(self):
+        def respond(devnumber, payload, long_message):
+            if payload[2:] == struct.pack("!H", 0x1814):
+                return payload[:2] + bytes([0x08, 0x00, 0x04])
+            return payload[:2] + bytes([0x03, 0x01])  # currently on host #2
+
+        device, transport = self._device(respond)
+
+        util.change_device_host(device, 2)
+
+        assert len(transport.writes) == 2
+
     def test_resource_error_is_reported_as_unreachable(self):
         # 0x09 (resource error) is what a receiver answers with once the
         # device has switched to another host -- exactly the case that used to

@@ -19,13 +19,14 @@ from rich.prompt import Prompt
 
 from .. import constants
 from .. import exceptions
+from ..hidpp import DeviceEndpoint
 from ..hidpp import Notification
 from ..hidpp import PairedDevice
-from ..hidpp import Receiver
 from ..hidpp import ReceiverManager
 from ..reconciler import Reconciler
 from ..sse import EventBroadcaster
 from ..sse import format_sse
+from ..switch_hooks import SwitchHookRunner
 from ..tui import DeviceStatus
 from ..tui import FlowTUIApp
 from ..tui import ServerStatus
@@ -87,6 +88,7 @@ class FlowServerAPI(Flask):
         binding_interface: str,
         port: int,
         clipboard_enabled: bool = True,
+        switch_hooks: list[str] | None = None,
         **kwargs,
     ):
         self.host_number = host_number
@@ -96,6 +98,7 @@ class FlowServerAPI(Flask):
         self.binding_interface = binding_interface
         self.port = port
         self.clipboard_enabled = clipboard_enabled
+        self.switch_hooks = SwitchHookRunner(switch_hooks or [], local_host=host_number)
 
         self._leader_connected = False
 
@@ -118,13 +121,16 @@ class FlowServerAPI(Flask):
 
         # Supervise the distinct receivers backing the relevant devices
         # (leader and followers may share a receiver).
-        seen_receivers: list[Receiver] = []
+        seen_receivers: list[DeviceEndpoint] = []
         for device in (self.leader_device, *self.follower_devices):
             if device.receiver in seen_receivers:
                 continue
             seen_receivers.append(device.receiver)
         self.manager = ReceiverManager(
-            seen_receivers, rebind=self._bind_receivers, callback=self.callback
+            seen_receivers,
+            rebind=self._bind_receivers,
+            callback=self.callback,
+            presence_callback=self.presence_callback,
         )
 
         user_data_dir = platformdirs.user_data_dir(
@@ -151,7 +157,7 @@ class FlowServerAPI(Flask):
         self.manager.start()
         self.reconciler.start()
 
-    def _bind_receivers(self, receivers: list[Receiver]) -> None:
+    def _bind_receivers(self, receivers: list[DeviceEndpoint]) -> None:
         """Re-resolve the leader/follower devices against freshly opened
         receivers; called by the `ReceiverManager` after a receiver was
         rediscovered post-replug. Raises `DeviceNotFound` (making the
@@ -238,7 +244,7 @@ class FlowServerAPI(Flask):
 
         return False
 
-    def callback(self, receiver: Receiver, notification: Notification) -> None:
+    def callback(self, receiver: DeviceEndpoint, notification: Notification) -> None:
         if notification.sub_id != 0x41:
             return
 
@@ -272,9 +278,38 @@ class FlowServerAPI(Flask):
                 logger.info("Device %s disconnected", device.id)
             self._publish_status()
 
+    def presence_callback(self, device: PairedDevice, connected: bool) -> None:
+        """Handle presence of a directly-connected Bluetooth HID++ device."""
+        known = next(
+            (
+                candidate
+                for candidate in (self.leader_device, *self.follower_devices)
+                if candidate.id == device.id
+            ),
+            None,
+        )
+        if known is None:
+            return
+        if known is self.leader_device:
+            self._leader_connected = connected
+            logger.info(
+                "Device %s %s", known.id, "connected" if connected else "disconnected"
+            )
+            if connected:
+                self.report_leader_host(self.host_number)
+            else:
+                self._publish_status()
+        else:
+            self.reconciler.observe(known, connected)
+            logger.info(
+                "Device %s %s", known.id, "connected" if connected else "disconnected"
+            )
+            self._publish_status()
+
     def report_leader_host(self, new_host: int) -> None:
         """Record positive evidence that the leader is now on `new_host`."""
         self.events.set_state("leader-host", str(new_host))
+        self.switch_hooks.trigger(new_host)
         self.reconciler.poke()
         self._publish_status()
 
@@ -429,6 +464,17 @@ class FlowServer(LogitechFlowKvmCommand):
             ),
         )
         parser.add_argument(
+            "--on-switch-execute",
+            action="append",
+            default=[],
+            metavar="COMMAND",
+            help=(
+                "Run a local shell command when the leader host changes. May be "
+                "specified more than once. Host numbers are provided in "
+                "LOGITECH_FLOW_{LOCAL,PREVIOUS,TARGET}_HOST."
+            ),
+        )
+        parser.add_argument(
             "--hostname",
             "-H",
             action="append",
@@ -496,6 +542,7 @@ class FlowServer(LogitechFlowKvmCommand):
             binding_interface=self.options.binding_interface,
             port=self.options.port,
             clipboard_enabled=not self.options.no_clipboard,
+            switch_hooks=self.options.on_switch_execute,
         )
 
         bind_routes(app)

@@ -1,0 +1,5 @@
+# Permit the active desktop user to access Logitech HID++ hidraw nodes.
+# USB-connected receivers and devices.
+ACTION!="remove", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", TAG+="uaccess"
+# Bluetooth-connected Logitech devices (their USB-style idVendor is not in sysfs).
+ACTION!="remove", SUBSYSTEM=="hidraw", KERNELS=="0005:046D:*", TAG+="uaccess"

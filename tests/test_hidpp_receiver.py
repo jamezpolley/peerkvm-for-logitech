@@ -3,12 +3,14 @@ import struct
 from hidpp_fakes import ScriptedReply
 from hidpp_fakes import ScriptedTransport
 from hidpp_fakes import register_matcher
+from logitech_flow_kvm.hidpp.models import DirectDeviceInfo
 from logitech_flow_kvm.hidpp.models import ReceiverInfo
 from logitech_flow_kvm.hidpp.receiver import SUB_BOLT_PAIRING_INFO
 from logitech_flow_kvm.hidpp.receiver import SUB_RECEIVER_INFORMATION
 from logitech_flow_kvm.hidpp.receiver import SUB_UNIFYING_DEVICE_NAME
 from logitech_flow_kvm.hidpp.receiver import SUB_UNIFYING_EXTENDED_PAIRING_INFO
 from logitech_flow_kvm.hidpp.receiver import SUB_UNIFYING_PAIRING_INFO
+from logitech_flow_kvm.hidpp.receiver import DirectDevice
 from logitech_flow_kvm.hidpp.receiver import Receiver
 
 BOLT_INFO = ReceiverInfo(
@@ -225,3 +227,29 @@ class TestNotifications:
         devnumber, payload, _long_message = transport.writes[0]
         assert devnumber == 0xFF
         assert payload[2:3] == bytes([0x02])
+
+
+class TestDirectDevice:
+    def test_uses_direct_address_and_long_report(self):
+        info = DirectDeviceInfo(
+            path="/dev/hidraw2",
+            product_id=0xB369,
+            name="MX Keys Mini",
+            serial="d7:c3:34:36:65:db",
+            bus_id=5,
+            hidpp_long=True,
+        )
+        transport = ScriptedTransport()
+        direct = DirectDevice(info, transport=transport)
+
+        device = direct.get_device()
+        assert device is not None
+        assert device.path == "/dev/hidraw2"
+        assert device.wpid == "B369"
+        assert device.codename == "MX Keys Mini"
+        assert device.serial == "D7:C3:34:36:65:DB"
+
+        direct.ping_device()
+
+        assert transport.writes[0][0] == 0xFF
+        assert transport.writes[0][2] is True

@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from argparse import ArgumentParser
+from argparse import ArgumentTypeError
 from collections.abc import Callable
 from typing import Literal
 
@@ -19,13 +20,17 @@ from urllib3.exceptions import InsecureRequestWarning
 
 from .. import constants
 from .. import exceptions
+from ..hidpp import DeviceEndpoint
+from ..hidpp import DirectDevice
 from ..hidpp import Notification
 from ..hidpp import PairedDevice
 from ..hidpp import Receiver
 from ..hidpp import ReceiverManager
+from ..hidpp import find_direct_devices
 from ..hidpp import find_receivers
 from ..reconciler import Reconciler
 from ..sse import parse_sse_stream
+from ..switch_hooks import SwitchHookRunner
 from ..tui import ClientStatus
 from ..tui import DeviceStatus
 from ..tui import FlowTUIApp
@@ -61,6 +66,18 @@ EVENTS_READ_TIMEOUT = 45.0
 PAIRING_READ_TIMEOUT = 600.0
 
 
+def parse_device_id_map(value: str) -> tuple[str, str]:
+    """Parse a server-id=local-id mapping supplied on the command line."""
+    server_id, separator, local_id = value.partition("=")
+    server_id = server_id.strip()
+    local_id = local_id.strip()
+    if not separator or not server_id or not local_id:
+        raise ArgumentTypeError(
+            "expected SERVER_ID=LOCAL_ID (for example, ABC123=DEF456)"
+        )
+    return server_id, local_id
+
+
 class FlowClient(LogitechFlowKvmCommand):
     leader_id: str
     follower_ids: list[str]
@@ -69,7 +86,7 @@ class FlowClient(LogitechFlowKvmCommand):
     clipboard_enabled: bool = True
 
     follower_devices: list[PairedDevice]
-    local_receivers: list[Receiver]
+    local_receivers: list[DeviceEndpoint]
     manager: ReceiverManager
     reconciler: Reconciler
     # The leader's last-known host, as reported over the server's /events
@@ -95,6 +112,7 @@ class FlowClient(LogitechFlowKvmCommand):
         # Populated by `handle()`; empty until then so notification handling
         # is well-defined even before devices have been resolved.
         self.follower_devices = []
+        self.switch_hooks = SwitchHookRunner([], local_host=0)
 
     @classmethod
     def add_arguments(cls, parser: ArgumentParser) -> None:
@@ -109,15 +127,50 @@ class FlowClient(LogitechFlowKvmCommand):
                 "clipboard will neither be read nor written."
             ),
         )
+        parser.add_argument(
+            "--on-switch-execute",
+            action="append",
+            default=[],
+            metavar="COMMAND",
+            help=(
+                "Run a local shell command when the leader host changes. May be "
+                "specified more than once. Host numbers are provided in "
+                "LOGITECH_FLOW_{LOCAL,PREVIOUS,TARGET}_HOST."
+            ),
+        )
+        parser.add_argument(
+            "--device-id-map",
+            action="append",
+            default=[],
+            type=parse_device_id_map,
+            metavar="SERVER_ID=LOCAL_ID",
+            help=(
+                "Map a device ID reported by the server to the ID of the same "
+                "device on this client. May be specified more than once. This "
+                "is useful for Bluetooth devices whose IDs differ by host."
+            ),
+        )
 
-    def _find_follower(self, receiver: Receiver, devnumber: int) -> PairedDevice | None:
+    def _device_id_map(self) -> dict[str, str]:
+        mappings: dict[str, str] = {}
+        for server_id, local_id in getattr(self.options, "device_id_map", []):
+            if server_id in mappings and mappings[server_id] != local_id:
+                raise ValueError(
+                    f"Conflicting local IDs configured for server device {server_id}"
+                )
+            mappings[server_id] = local_id
+        return mappings
+
+    def _find_follower(
+        self, receiver: DeviceEndpoint, devnumber: int
+    ) -> PairedDevice | None:
         """Match an incoming notification to an already-resolved follower."""
         for device in self.follower_devices:
             if device.receiver is receiver and device.number == devnumber:
                 return device
         return None
 
-    def callback(self, receiver: Receiver, notification: Notification) -> None:
+    def callback(self, receiver: DeviceEndpoint, notification: Notification) -> None:
         if notification.sub_id != 0x41:
             return
 
@@ -157,6 +210,23 @@ class FlowClient(LogitechFlowKvmCommand):
         elif is_leader and self.clipboard_enabled:
             self._http_tasks.put(self._push_clipboard)
 
+        self._publish_status()
+
+    def presence_callback(self, device: PairedDevice, connected: bool) -> None:
+        known = next(
+            (
+                candidate
+                for candidate in self.follower_devices
+                if candidate.id == device.id
+            ),
+            None,
+        )
+        if known is None:
+            return
+        logger.info(
+            "Device %s %s", known.id, "connected" if connected else "disconnected"
+        )
+        self.reconciler.observe(known, connected)
         self._publish_status()
 
     def _report_leader_host_here(self) -> None:
@@ -227,6 +297,7 @@ class FlowClient(LogitechFlowKvmCommand):
     def _handle_event(self, event_type: str, data: str) -> None:
         if event_type == "leader-host":
             self.leader_host = int(data)
+            self.switch_hooks.trigger(self.leader_host)
             self.reconciler.poke()
             self._publish_status()
         elif event_type == "host-connected":
@@ -268,6 +339,8 @@ class FlowClient(LogitechFlowKvmCommand):
                 # recovers cross-client state (e.g. after a restart) at the
                 # same moment we're asking it for its current state.
                 for receiver in self.local_receivers:
+                    if isinstance(receiver, DirectDevice):
+                        continue
                     try:
                         receiver.notify_devices()
                     except OSError:
@@ -367,6 +440,9 @@ class FlowClient(LogitechFlowKvmCommand):
         return cert_path, token
 
     def handle(self):
+        self.switch_hooks = SwitchHookRunner(
+            self.options.on_switch_execute, local_host=self.options.host_number
+        )
         self.clipboard_enabled = not self.options.no_clipboard
 
         self.cert, self.token = self.get_certificate_path_and_token()
@@ -376,10 +452,25 @@ class FlowClient(LogitechFlowKvmCommand):
         result.raise_for_status()
 
         response = result.json()
-        self.leader_id = response["leader"]
-        self.follower_ids = response["followers"]
+        device_id_map = self._device_id_map()
+        server_device_ids = {response["leader"], *response["followers"]}
+        unknown_ids = set(device_id_map) - server_device_ids
+        if unknown_ids:
+            unknown = ", ".join(sorted(unknown_ids))
+            raise ValueError(f"Device ID map refers to unknown server IDs: {unknown}")
 
-        device_id_map: dict[str, PairedDevice | None] = {
+        self.leader_id = device_id_map.get(response["leader"], response["leader"])
+        self.follower_ids = [
+            device_id_map.get(follower_id, follower_id)
+            for follower_id in response["followers"]
+        ]
+
+        for server_id, local_id in device_id_map.items():
+            logger.info(
+                "Mapping server device %s to local device %s", server_id, local_id
+            )
+
+        found_device_map: dict[str, PairedDevice | None] = {
             follower: None for follower in self.follower_ids
         }
         self.local_receivers = []
@@ -388,16 +479,26 @@ class FlowClient(LogitechFlowKvmCommand):
             enumerate_task = progress.add_task(
                 "Finding devices...", total=get_theoretical_max_device_count()
             )
-            for info in find_receivers():
-                receiver = Receiver(info)
+            for receiver_info in find_receivers():
+                receiver = Receiver(receiver_info)
                 self.local_receivers.append(receiver)
                 for device in receiver.enumerate_devices():
-                    if device.serial in device_id_map:
-                        device_id_map[device.serial] = device
+                    if device.serial in found_device_map:
+                        found_device_map[device.serial] = device
                 progress.advance(enumerate_task, receiver.max_devices)
+            for direct_info in find_direct_devices():
+                device_endpoint = DirectDevice(direct_info)
+                direct_device = device_endpoint.get_device()
+                if (
+                    direct_device is not None
+                    and direct_device.serial in found_device_map
+                ):
+                    found_device_map[direct_device.serial] = direct_device
+                    self.local_receivers.append(device_endpoint)
+                progress.advance(enumerate_task)
 
         self.follower_devices = []
-        for follower_id, found_device in device_id_map.items():
+        for follower_id, found_device in found_device_map.items():
             if found_device is None:
                 raise exceptions.DeviceNotFound(follower_id)
             self.follower_devices.append(found_device)
@@ -410,7 +511,10 @@ class FlowClient(LogitechFlowKvmCommand):
             on_observation=self._reconciler_observation,
         )
         self.manager = ReceiverManager(
-            self.local_receivers, rebind=self._bind_receivers, callback=self.callback
+            self.local_receivers,
+            rebind=self._bind_receivers,
+            callback=self.callback,
+            presence_callback=self.presence_callback,
         )
 
         self._stop = threading.Event()
@@ -445,7 +549,7 @@ class FlowClient(LogitechFlowKvmCommand):
                 self.reconciler.stop()
                 self.manager.stop()
 
-    def _bind_receivers(self, receivers: list[Receiver]) -> None:
+    def _bind_receivers(self, receivers: list[DeviceEndpoint]) -> None:
         """Re-resolve the follower devices against freshly opened receivers;
         called by the `ReceiverManager` after a receiver was rediscovered
         post-replug. Raises `DeviceNotFound` (making the manager retry)

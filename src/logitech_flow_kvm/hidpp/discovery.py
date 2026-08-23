@@ -1,6 +1,7 @@
 import glob
 import os
 
+from .models import DirectDeviceInfo
 from .models import ReceiverInfo
 
 LOGITECH_VENDOR_ID = 0x046D
@@ -17,6 +18,7 @@ KNOWN_RECEIVERS: dict[int, str] = {
 HIDPP_USB_INTERFACE = 2
 
 HIDRAW_SYSFS_GLOB = "/sys/class/hidraw/hidraw*"
+BLUETOOTH_BUS_ID = 0x0005
 
 
 def _read_uevent(uevent_path: str) -> dict[str, str]:
@@ -72,4 +74,49 @@ def find_receivers() -> list[ReceiverInfo]:
             )
         )
 
+    return found
+
+
+def find_direct_devices() -> list[DirectDeviceInfo]:
+    """Enumerate directly-connected Logitech Bluetooth HID++ devices.
+
+    HID++ traffic needs a vendor report exposed by the device.  Bluetooth
+    devices generally expose only the long (0x11) report, so reject ordinary
+    Logitech HID devices that do not advertise it.
+    """
+    found = []
+    for node in sorted(glob.glob(HIDRAW_SYSFS_GLOB)):
+        device_dir = os.path.join(node, "device")
+        uevent = _read_uevent(os.path.join(device_dir, "uevent"))
+        hid_id = uevent.get("HID_ID")
+        if not hid_id:
+            continue
+        try:
+            bus_hex, vendor_hex, product_hex = hid_id.split(":")
+            bus = int(bus_hex, 16)
+            vendor = int(vendor_hex, 16)
+            product = int(product_hex, 16) & 0xFFFF
+        except ValueError:
+            continue
+        if bus != BLUETOOTH_BUS_ID or vendor != LOGITECH_VENDOR_ID:
+            continue
+
+        try:
+            with open(os.path.join(device_dir, "report_descriptor"), "rb") as f:
+                descriptor = f.read()
+        except OSError:
+            continue
+        if b"\x85\x11" not in descriptor:
+            continue
+
+        found.append(
+            DirectDeviceInfo(
+                path=f"/dev/{os.path.basename(node)}",
+                product_id=product,
+                name=uevent.get("HID_NAME"),
+                serial=uevent.get("HID_UNIQ") or None,
+                bus_id=bus,
+                hidpp_long=True,
+            )
+        )
     return found
