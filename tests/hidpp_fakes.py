@@ -71,3 +71,6 @@ class ScriptedTransport:
 
     def drain(self) -> None:
         self._pending.clear()
+
+    def close(self) -> None:
+        pass

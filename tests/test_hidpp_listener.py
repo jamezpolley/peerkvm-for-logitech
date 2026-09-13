@@ -7,19 +7,16 @@ from logitech_flow_kvm.hidpp.listener import NotificationListener
 from logitech_flow_kvm.hidpp.models import Notification
 
 
-class ScriptedHidRawIO:
-    """Stands in for HidRawIO: replays scripted reports, then raises OSError
-    (as a real hidraw read does once the receiver is unplugged)."""
+class ScriptedIO:
+    """Stands in for the transport: replays scripted reports, then raises OSError
+    (as a real read does once the receiver is unplugged)."""
 
     reports: list[tuple[int, int, bytes]] = []
 
     def __init__(self, path: str):
         self._pending = list(self.reports)
 
-    def __enter__(self) -> "ScriptedHidRawIO":
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
+    def close(self) -> None:
         pass
 
     def read(self, timeout: float) -> tuple[int, int, bytes] | None:
@@ -33,8 +30,8 @@ CONNECT_REPORT = (0x10, 0x01, b"\x41\x04\x61\x10\x00")
 
 @pytest.fixture
 def scripted_io(monkeypatch):
-    monkeypatch.setattr(listener_module, "HidRawIO", ScriptedHidRawIO)
-    return ScriptedHidRawIO
+    monkeypatch.setattr(listener_module, "open_transport", ScriptedIO)
+    return ScriptedIO
 
 
 def test_delivers_notifications_to_callback(scripted_io):
@@ -68,7 +65,7 @@ def test_on_disconnect_fires_when_the_node_cannot_be_opened(monkeypatch):
         def __init__(self, path):
             raise OSError("no such device")
 
-    monkeypatch.setattr(listener_module, "HidRawIO", UnopenableIO)
+    monkeypatch.setattr(listener_module, "open_transport", UnopenableIO)
     disconnected = []
 
     listener = NotificationListener(
@@ -87,17 +84,14 @@ def test_on_disconnect_does_not_fire_when_stopped(monkeypatch):
         def __init__(self, path):
             pass
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc_info):
+        def close(self):
             pass
 
         def read(self, timeout):
             reading.set()
             return None
 
-    monkeypatch.setattr(listener_module, "HidRawIO", IdleIO)
+    monkeypatch.setattr(listener_module, "open_transport", IdleIO)
     disconnected = []
 
     listener = NotificationListener(

@@ -1,10 +1,11 @@
 import logging
 import threading
 from collections.abc import Callable
+from contextlib import closing
 
 from .models import Notification
 from .protocol import make_notification
-from .transport import HidRawIO
+from .transport import open_transport
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ class NotificationListener(threading.Thread):
         self._active.set()
         disconnected = False
         try:
-            with HidRawIO(self._receiver_path) as io:
+            with closing(open_transport(self._receiver_path)) as io:
                 while self._active.is_set():
                     try:
                         reply = io.read(READ_POLL_INTERVAL)

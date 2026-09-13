@@ -1,6 +1,6 @@
 import os
 
-from logitech_flow_kvm.hidpp import discovery
+from logitech_flow_kvm.hidpp import discovery_linux as discovery
 
 
 def _write_uevent(root, name: str, lines: list[str]) -> None:

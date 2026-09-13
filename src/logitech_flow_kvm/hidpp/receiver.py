@@ -10,7 +10,7 @@ from .models import ReceiverInfo
 from .protocol import RECEIVER_DEVNUMBER
 from .protocol import HidppConnection
 from .protocol import Transport
-from .transport import HidRawIO
+from .transport import open_transport
 
 RECEIVER_INFO_REGISTER = 0x2B5
 NOTIFICATIONS_REGISTER = 0x00
@@ -68,13 +68,13 @@ class Receiver:
     """An open connection to a single Logitech receiver."""
 
     def __init__(self, info: ReceiverInfo, *, transport: Transport | None = None):
-        """`transport` is a test seam; production always opens a real `HidRawIO`."""
+        """`transport` is a test seam; production always opens a real device."""
         self.path = info.path
         self.kind = info.kind
         self.product_id = info.product_id
-        self._io: HidRawIO | None = None
+        self._io: Transport | None = None
         if transport is None:
-            self._io = HidRawIO(info.path)
+            self._io = open_transport(info.path)
             transport = self._io
         self._conn = HidppConnection(transport)
         self.max_devices = self._detect_max_devices()
@@ -256,7 +256,7 @@ class DirectDevice:
         self.kind = "bluetooth"
         self.product_id = info.product_id
         self.max_devices = 1
-        self._io: HidRawIO | None = None
+        self._io: Transport | None = None
         self._conn = (
             HidppConnection(transport, force_long=info.hidpp_long)
             if transport is not None
@@ -278,7 +278,7 @@ class DirectDevice:
 
     def _connection(self) -> HidppConnection:
         if self._conn is None:
-            self._io = HidRawIO(self.path)
+            self._io = open_transport(self.path)
             self._conn = HidppConnection(self._io, force_long=self._force_long)
         return self._conn
 

@@ -16,13 +16,19 @@ DEFAULT_TIMEOUT = 2.0
 
 
 class Transport(Protocol):
-    """The subset of `HidRawIO` this layer depends on, so tests can inject a fake."""
+    """The subset of a HID backend this layer depends on, so tests can inject a fake.
+
+    Implemented by `transport_linux.HidRawIO` and `transport_hidapi.HidApiIO`;
+    `transport.open_transport` returns whichever suits the platform.
+    """
 
     def write(self, devnumber: int, payload: bytes, long_message: bool) -> None: ...
 
     def read(self, timeout: float) -> tuple[int, int, bytes] | None: ...
 
     def drain(self) -> None: ...
+
+    def close(self) -> None: ...
 
 
 def make_notification(
