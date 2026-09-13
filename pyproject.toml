@@ -95,6 +95,14 @@ check_untyped_defs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 
+# socket.AF_NETLINK exists only on Linux, so checking this module on Windows
+# reports it as missing. The module is reached only through the hotplug factory,
+# which selects it on Linux alone. An inline ignore is not usable here: it would
+# be flagged as unused by warn_unused_ignores when checking on Linux.
+[[tool.mypy.overrides]]
+module = "logitech_flow_kvm.udev_monitor"
+disable_error_code = ["attr-defined"]
+
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --tb=short"
 testpaths = ["tests"]

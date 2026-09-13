@@ -11,13 +11,13 @@ from .hidpp import PairedDevice
 from .hidpp import Receiver
 from .hidpp import find_direct_devices
 from .hidpp import find_receivers
+from .hotplug import create_hotplug_monitor
 from .node_protocol import DeviceAdvertisement
-from .udev_monitor import HidrawUdevMonitor
 from .util import change_device_host
 from .util import parse_connection_status
 
 logger = logging.getLogger(__name__)
-UDEV_SETTLE_DELAY = 0.2
+HOTPLUG_SETTLE_DELAY = 0.2
 
 
 def discover_device_advertisements() -> list[DeviceAdvertisement]:
@@ -68,7 +68,7 @@ class NodeDeviceManager:
         self._devices: dict[str, PairedDevice] = {}
         self._connected: set[str] = set()
         self._direct_ids: set[str] = set()
-        self._udev = HidrawUdevMonitor(self._udev_event)
+        self._hotplug = create_hotplug_monitor(self._hotplug_event)
         self._refresh_timer: threading.Timer | None = None
 
     def start(self) -> None:
@@ -79,14 +79,16 @@ class NodeDeviceManager:
             logger.exception(problem)
             self.on_problem(problem)
         try:
-            self._udev.start()
-        except OSError as error:
-            problem = f"Dynamic hidraw monitoring could not start: {error}"
+            self._hotplug.start()
+        except Exception as error:
+            # A node without hotplug monitoring still works; it just will not
+            # notice a device arriving until something else triggers a refresh.
+            problem = f"Dynamic device monitoring could not start: {error}"
             logger.exception(problem)
             self.on_problem(problem)
 
     def stop(self) -> None:
-        self._udev.stop()
+        self._hotplug.stop()
         if self._refresh_timer is not None:
             self._refresh_timer.cancel()
         with self._lock:
@@ -174,22 +176,22 @@ class NodeDeviceManager:
         self._connected.clear()
         self._direct_ids.clear()
 
-    def _udev_event(self, action: str, path: str) -> None:
-        logger.info("hidraw device %s: %s", action, path)
+    def _hotplug_event(self, action: str, path: str) -> None:
+        logger.info("HID device %s: %s", action, path)
         with self._lock:
             if self._refresh_timer is not None:
                 self._refresh_timer.cancel()
             self._refresh_timer = threading.Timer(
-                UDEV_SETTLE_DELAY, self._refresh_after_udev
+                HOTPLUG_SETTLE_DELAY, self._refresh_after_hotplug
             )
             self._refresh_timer.daemon = True
             self._refresh_timer.start()
 
-    def _refresh_after_udev(self) -> None:
+    def _refresh_after_hotplug(self) -> None:
         try:
             self.refresh()
         except Exception:
-            problem = "Could not refresh devices after a hidraw change"
+            problem = "Could not refresh devices after a hotplug change"
             logger.exception(problem)
             self.on_problem(problem)
 
