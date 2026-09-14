@@ -6,6 +6,7 @@ import re
 import socket
 from collections.abc import Iterable
 from json.decoder import JSONDecodeError
+from typing import Protocol
 from typing import TypedDict
 
 import platformdirs
@@ -223,6 +224,13 @@ def get_directed_broadcast_addresses() -> list[str]:
     interface, so sending to every interface's directed broadcast address
     alongside the limited one is robust to that kind of route misdirection.
 
+    psutil only reports a broadcast address on POSIX, where it is a separately
+    settable attribute of an address. Windows has no such field to report: the
+    directed broadcast is defined by the prefix, and neither
+    ``GetAdaptersAddresses`` nor psutil exposes it. It is derived from the
+    netmask instead. Without that fallback this returns [] on Windows, which is
+    the one platform the route misdirection this exists to fix was found on.
+
     Loopback and interfaces without a usable broadcast address (no netmask,
     point-to-point links) are skipped. Link-local (169.254.0.0/16) addresses
     are deliberately *included*: a NIC that hasn't yet obtained a DHCP or
@@ -237,11 +245,56 @@ def get_directed_broadcast_addresses() -> list[str]:
                 continue
             if address.address.startswith("127."):
                 continue
-            if not address.broadcast:
+
+            broadcast = _get_broadcast_address(address)
+            if broadcast is None:
                 continue
-            addresses.add(address.broadcast)
+
+            addresses.add(broadcast)
 
     return sorted(addresses)
+
+
+class _InterfaceAddress(Protocol):
+    """The fields of ``psutil._ntuples.snicaddr`` this module reads.
+
+    Declared structurally rather than importing psutil's namedtuple, which
+    lives in a private module.
+    """
+
+    @property
+    def address(self) -> str: ...
+
+    @property
+    def netmask(self) -> str | None: ...
+
+    @property
+    def broadcast(self) -> str | None: ...
+
+
+def _get_broadcast_address(address: _InterfaceAddress) -> str | None:
+    """Return the directed broadcast address for one psutil interface address.
+
+    Returns None when the interface has no broadcast address to send to: a
+    netmask psutil did not report or the stdlib will not parse, or a /31 or
+    /32 prefix. Those last two are point-to-point links with no broadcast
+    address of their own, and computing one anyway yields the interface's own
+    address, which would make every announcement a unicast to ourselves.
+    """
+    if not address.netmask:
+        return None
+
+    try:
+        network = ipaddress.IPv4Network(
+            f"{address.address}/{address.netmask}", strict=False
+        )
+    except ValueError:
+        return None
+
+    if network.prefixlen >= 31:
+        return None
+
+    return address.broadcast or str(network.broadcast_address)
 
 
 def get_host_certificate_path(name: str) -> str:

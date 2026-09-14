@@ -215,6 +215,111 @@ class TestGetDirectedBroadcastAddresses:
 
         assert util.get_directed_broadcast_addresses() == ["169.254.255.255"]
 
+    def test_derives_broadcast_from_netmask_when_psutil_omits_it(self, monkeypatch):
+        # psutil only populates the broadcast field on POSIX; on Windows it is
+        # always None and the address has to be derived from the netmask. These
+        # are the real values psutil reports on brassie (Windows 11, psutil
+        # 7.2.2), captured from psutil.net_if_addrs() rather than invented: the
+        # Wi-Fi NIC, the ICS virtual adapter whose lower route metric caused the
+        # original bug, a Hyper-V switch on a non-byte-aligned /20, and an
+        # unconfigured NIC holding an APIPA address.
+        monkeypatch.setattr(
+            util.psutil,
+            "net_if_addrs",
+            lambda: {
+                "Wi-Fi": [
+                    FakeAddr(
+                        socket.AF_INET, "192.168.2.122", "255.255.255.0", None, None
+                    ),
+                ],
+                "Local Area Connection* 2": [
+                    FakeAddr(
+                        socket.AF_INET, "192.168.137.1", "255.255.255.0", None, None
+                    ),
+                ],
+                "vEthernet (Default Switch)": [
+                    FakeAddr(
+                        socket.AF_INET, "192.168.16.1", "255.255.240.0", None, None
+                    ),
+                ],
+                "Ethernet": [
+                    FakeAddr(
+                        socket.AF_INET, "169.254.144.118", "255.255.0.0", None, None
+                    ),
+                ],
+            },
+        )
+
+        assert util.get_directed_broadcast_addresses() == [
+            "169.254.255.255",
+            "192.168.137.255",
+            "192.168.2.255",
+            "192.168.31.255",
+        ]
+
+    def test_prefers_the_broadcast_address_psutil_reports(self, monkeypatch):
+        # On POSIX the broadcast address is a separately settable attribute of
+        # the address, so it need not be the one implied by the netmask. Where
+        # psutil reports one, it wins over the derived value.
+        monkeypatch.setattr(
+            util.psutil,
+            "net_if_addrs",
+            lambda: {
+                "eth0": [
+                    FakeAddr(
+                        socket.AF_INET,
+                        "192.168.2.122",
+                        "255.255.255.0",
+                        "192.168.2.254",
+                        None,
+                    ),
+                ],
+            },
+        )
+
+        assert util.get_directed_broadcast_addresses() == ["192.168.2.254"]
+
+    def test_excludes_point_to_point_prefixes_without_a_broadcast_address(
+        self, monkeypatch
+    ):
+        # A /32 has a single address and a /31 (RFC 3021) two host addresses;
+        # neither has a broadcast address. ipaddress still yields the last
+        # address of the network, which for a /32 is the interface's own
+        # address, so sending there would be a unicast to ourselves. psutil
+        # reports no broadcast for these on POSIX, but on Windows there is only
+        # the netmask to go on, so the prefix length has to be checked.
+        monkeypatch.setattr(
+            util.psutil,
+            "net_if_addrs",
+            lambda: {
+                "Tailscale": [
+                    FakeAddr(
+                        socket.AF_INET, "100.100.231.2", "255.255.255.255", None, None
+                    ),
+                ],
+                "ppp0": [
+                    FakeAddr(socket.AF_INET, "10.0.0.4", "255.255.255.254", None, None),
+                ],
+            },
+        )
+
+        assert util.get_directed_broadcast_addresses() == []
+
+    def test_excludes_interfaces_with_an_unparseable_netmask(self, monkeypatch):
+        monkeypatch.setattr(
+            util.psutil,
+            "net_if_addrs",
+            lambda: {
+                "eth0": [
+                    FakeAddr(
+                        socket.AF_INET, "192.168.2.122", "255.0.255.0", None, None
+                    ),
+                ],
+            },
+        )
+
+        assert util.get_directed_broadcast_addresses() == []
+
 
 class TestHostCertificateAndToken:
     def test_roundtrip(self, user_data_dir):
