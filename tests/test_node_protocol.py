@@ -1,10 +1,15 @@
 import base64
 import json
+import time
+from unittest.mock import Mock
 
 import pytest
 
+from logitech_flow_kvm import node_protocol
+from logitech_flow_kvm.node_protocol import LIMITED_BROADCAST_ADDRESS
 from logitech_flow_kvm.node_protocol import MAX_PADDING_BYTES
 from logitech_flow_kvm.node_protocol import MIN_PADDING_BYTES
+from logitech_flow_kvm.node_protocol import BroadcastTransport
 from logitech_flow_kvm.node_protocol import DecodedPacket
 from logitech_flow_kvm.node_protocol import DeviceAdvertisement
 from logitech_flow_kvm.node_protocol import NodeAdvertisement
@@ -90,3 +95,133 @@ def test_replay_guard_expires_cache_entries():
     # The timestamp window remains the primary protection after cache expiry.
     with pytest.raises(ReplayRejected, match="too old"):
         guard.accept(first, now=161.0)
+
+
+def make_transport(**kwargs) -> tuple[BroadcastTransport, Mock]:
+    transport = BroadcastTransport(
+        secret="shared", port=24801, on_message=lambda *_a: None, **kwargs
+    )
+    sock = Mock()
+    transport._socket = sock
+    return transport, sock
+
+
+def sent_destinations(sock: Mock) -> set[str]:
+    return {call.args[1][0] for call in sock.sendto.call_args_list}
+
+
+class TestBroadcastTransportSend:
+    def test_sends_to_limited_broadcast_when_no_interfaces_found(self, monkeypatch):
+        monkeypatch.setattr(
+            node_protocol.util, "get_directed_broadcast_addresses", lambda: []
+        )
+        transport, sock = make_transport()
+
+        transport.send(advertisement())
+
+        assert sent_destinations(sock) == {LIMITED_BROADCAST_ADDRESS}
+
+    def test_also_sends_to_each_directed_broadcast_address(self, monkeypatch):
+        monkeypatch.setattr(
+            node_protocol.util,
+            "get_directed_broadcast_addresses",
+            lambda: ["192.168.2.255", "10.0.0.255"],
+        )
+        transport, sock = make_transport()
+
+        transport.send(advertisement())
+
+        assert sent_destinations(sock) == {
+            LIMITED_BROADCAST_ADDRESS,
+            "192.168.2.255",
+            "10.0.0.255",
+        }
+
+    def test_deduplicates_destinations(self, monkeypatch):
+        monkeypatch.setattr(
+            node_protocol.util,
+            "get_directed_broadcast_addresses",
+            lambda: [LIMITED_BROADCAST_ADDRESS, "192.168.2.255", "192.168.2.255"],
+        )
+        transport, sock = make_transport()
+
+        transport.send(advertisement())
+
+        assert sock.sendto.call_count == 2
+
+    def test_records_the_destinations_it_tried(self, monkeypatch):
+        monkeypatch.setattr(
+            node_protocol.util,
+            "get_directed_broadcast_addresses",
+            lambda: ["192.168.2.255"],
+        )
+        transport, _sock = make_transport()
+
+        transport.send(advertisement())
+
+        assert transport.last_destinations == [
+            "192.168.2.255",
+            LIMITED_BROADCAST_ADDRESS,
+        ]
+
+    def test_a_failed_destination_does_not_stop_the_others(self, monkeypatch):
+        monkeypatch.setattr(
+            node_protocol.util,
+            "get_directed_broadcast_addresses",
+            lambda: ["192.168.2.255"],
+        )
+        errors = []
+        transport, sock = make_transport(
+            on_send_error=lambda destination, error: errors.append((destination, error))
+        )
+        sock.sendto.side_effect = [OSError("unreachable"), None]
+
+        transport.send(advertisement())
+
+        assert sock.sendto.call_count == 2
+        assert errors == [("192.168.2.255", errors[0][1])]
+        assert isinstance(errors[0][1], OSError)
+
+    def test_send_error_without_a_callback_does_not_raise(self, monkeypatch):
+        monkeypatch.setattr(
+            node_protocol.util, "get_directed_broadcast_addresses", lambda: []
+        )
+        transport, sock = make_transport()
+        sock.sendto.side_effect = OSError("unreachable")
+
+        transport.send(advertisement())
+
+    def test_caches_destinations_within_the_ttl(self, monkeypatch):
+        calls = []
+
+        def fake_get_directed_broadcast_addresses():
+            calls.append(1)
+            return ["192.168.2.255"]
+
+        monkeypatch.setattr(
+            node_protocol.util,
+            "get_directed_broadcast_addresses",
+            fake_get_directed_broadcast_addresses,
+        )
+        times = iter([0.0, 1.0, 40.0])
+        monkeypatch.setattr(time, "monotonic", lambda: next(times))
+        transport, _sock = make_transport()
+
+        transport.send(advertisement())
+        transport.send(advertisement())
+        transport.send(advertisement())
+
+        assert len(calls) == 2
+
+    def test_enumeration_failure_falls_back_to_limited_broadcast(self, monkeypatch):
+        def raise_error():
+            raise OSError("enumeration failed")
+
+        monkeypatch.setattr(
+            node_protocol.util, "get_directed_broadcast_addresses", raise_error
+        )
+        transport, sock = make_transport()
+
+        transport.send(advertisement())
+
+        assert sent_destinations(sock) == {LIMITED_BROADCAST_ADDRESS}

@@ -2,7 +2,9 @@ import datetime
 import ipaddress
 import json
 import os
+import socket
 import struct
+from collections import namedtuple
 
 import platformdirs
 import pytest
@@ -79,6 +81,139 @@ class TestGetAllIps:
         assert ips
         for ip in ips:
             assert isinstance(ipaddress.ip_address(ip), ipaddress.IPv4Address)
+
+
+FakeAddr = namedtuple("FakeAddr", ["family", "address", "netmask", "broadcast", "ptp"])
+
+
+class TestGetDirectedBroadcastAddresses:
+    def test_returns_broadcast_addresses_as_valid_ipv4(self):
+        # Sanity check against whatever interfaces this machine actually has,
+        # matching the style of TestGetAllIps above.
+        for address in util.get_directed_broadcast_addresses():
+            assert isinstance(ipaddress.ip_address(address), ipaddress.IPv4Address)
+
+    def test_includes_directed_broadcast_for_each_interface(self, monkeypatch):
+        monkeypatch.setattr(
+            util.psutil,
+            "net_if_addrs",
+            lambda: {
+                "eth0": [
+                    FakeAddr(
+                        socket.AF_INET,
+                        "192.168.2.122",
+                        "255.255.255.0",
+                        "192.168.2.255",
+                        None,
+                    ),
+                ],
+                "eth1": [
+                    FakeAddr(
+                        socket.AF_INET, "10.0.0.5", "255.255.255.0", "10.0.0.255", None
+                    ),
+                ],
+            },
+        )
+
+        assert util.get_directed_broadcast_addresses() == [
+            "10.0.0.255",
+            "192.168.2.255",
+        ]
+
+    def test_deduplicates_identical_broadcast_addresses(self, monkeypatch):
+        monkeypatch.setattr(
+            util.psutil,
+            "net_if_addrs",
+            lambda: {
+                "eth0": [
+                    FakeAddr(
+                        socket.AF_INET,
+                        "192.168.2.122",
+                        "255.255.255.0",
+                        "192.168.2.255",
+                        None,
+                    ),
+                ],
+                "eth0:1": [
+                    FakeAddr(
+                        socket.AF_INET,
+                        "192.168.2.123",
+                        "255.255.255.0",
+                        "192.168.2.255",
+                        None,
+                    ),
+                ],
+            },
+        )
+
+        assert util.get_directed_broadcast_addresses() == ["192.168.2.255"]
+
+    def test_excludes_loopback(self, monkeypatch):
+        monkeypatch.setattr(
+            util.psutil,
+            "net_if_addrs",
+            lambda: {
+                "lo": [
+                    FakeAddr(socket.AF_INET, "127.0.0.1", "255.0.0.0", None, None),
+                ],
+            },
+        )
+
+        assert util.get_directed_broadcast_addresses() == []
+
+    def test_excludes_interfaces_without_a_broadcast_address(self, monkeypatch):
+        monkeypatch.setattr(
+            util.psutil,
+            "net_if_addrs",
+            lambda: {
+                "tailscale0": [
+                    FakeAddr(
+                        socket.AF_INET,
+                        "100.100.231.2",
+                        "255.255.255.255",
+                        None,
+                        "100.100.231.2",
+                    ),
+                ],
+            },
+        )
+
+        assert util.get_directed_broadcast_addresses() == []
+
+    def test_excludes_non_ipv4_addresses(self, monkeypatch):
+        monkeypatch.setattr(
+            util.psutil,
+            "net_if_addrs",
+            lambda: {
+                "eth0": [
+                    FakeAddr(socket.AF_INET6, "fe80::1", "ffff:ffff::", None, None),
+                ],
+            },
+        )
+
+        assert util.get_directed_broadcast_addresses() == []
+
+    def test_includes_link_local_interfaces(self, monkeypatch):
+        # A NIC that hasn't obtained a DHCP/static address yet can still carry
+        # a 169.254.0.0/16 address; excluding it would silently drop that
+        # adapter from discovery, which is the class of bug this is fixing.
+        monkeypatch.setattr(
+            util.psutil,
+            "net_if_addrs",
+            lambda: {
+                "eth0": [
+                    FakeAddr(
+                        socket.AF_INET,
+                        "169.254.1.2",
+                        "255.255.0.0",
+                        "169.254.255.255",
+                        None,
+                    ),
+                ],
+            },
+        )
+
+        assert util.get_directed_broadcast_addresses() == ["169.254.255.255"]
 
 
 class TestHostCertificateAndToken:

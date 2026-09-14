@@ -211,6 +211,39 @@ def get_all_ips() -> list[str]:
     return list(ips)
 
 
+def get_directed_broadcast_addresses() -> list[str]:
+    """Return each active IPv4 interface's directed broadcast address.
+
+    The limited broadcast address 255.255.255.255 is resolved by the OS with
+    a single route lookup, and on a host with multiple IPv4 interfaces
+    (e.g. a virtual adapter alongside a real NIC) that lookup can pick the
+    wrong one if it has a lower route metric, silently sending broadcasts
+    out an interface with no other hosts on it. A directed broadcast address
+    (e.g. 192.168.2.255 for 192.168.2.0/24) is inherently tied to a specific
+    interface, so sending to every interface's directed broadcast address
+    alongside the limited one is robust to that kind of route misdirection.
+
+    Loopback and interfaces without a usable broadcast address (no netmask,
+    point-to-point links) are skipped. Link-local (169.254.0.0/16) addresses
+    are deliberately *included*: a NIC that hasn't yet obtained a DHCP or
+    static address can still carry one, and excluding it would silently drop
+    that adapter from discovery.
+    """
+    addresses = set()
+
+    for interface_addresses in psutil.net_if_addrs().values():
+        for address in interface_addresses:
+            if address.family != socket.AF_INET:
+                continue
+            if address.address.startswith("127."):
+                continue
+            if not address.broadcast:
+                continue
+            addresses.add(address.broadcast)
+
+    return sorted(addresses)
+
+
 def get_host_certificate_path(name: str) -> str:
     user_data_dir = platformdirs.user_data_dir(constants.APP_NAME, constants.APP_AUTHOR)
     os.makedirs(user_data_dir, exist_ok=True)

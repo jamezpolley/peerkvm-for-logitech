@@ -17,6 +17,8 @@ from typing import Any
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from . import util
+
 PROTOCOL_VERSION = 1
 MAX_PACKET_SIZE = 65507
 MIN_PADDING_BYTES = 256
@@ -25,6 +27,12 @@ MAX_PACKET_AGE_SECONDS = 30.0
 MAX_FUTURE_SKEW_SECONDS = 5.0
 REPLAY_CACHE_TTL_SECONDS = 60.0
 MAX_REPLAY_CACHE_ENTRIES = 4096
+LIMITED_BROADCAST_ADDRESS = "255.255.255.255"
+# How long to trust a previous interface enumeration before re-checking.
+# Adapters appearing/disappearing (e.g. a VPN connecting) are picked up on
+# the next refresh rather than on every single send, which would otherwise
+# call psutil once per ANNOUNCE_INTERVAL tick for no benefit.
+DESTINATION_CACHE_TTL_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -183,15 +191,23 @@ class BroadcastTransport:
         port: int,
         on_message: Callable[[NodeAdvertisement, str], None],
         on_invalid_packet: Callable[[str, Exception], None] | None = None,
+        on_send_error: Callable[[str, Exception], None] | None = None,
     ):
         self.secret = secret
         self.port = port
         self.on_message = on_message
         self.on_invalid_packet = on_invalid_packet
+        self.on_send_error = on_send_error
         self._stop = threading.Event()
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._replay_guard = ReplayGuard()
+        # The destinations most recently used by send(), so a caller (e.g.
+        # the "no peers discovered" status message) can report exactly what
+        # was tried rather than just asserting broadcasts happened.
+        self.last_destinations: list[str] = [LIMITED_BROADCAST_ADDRESS]
+        self._destinations_cache: list[str] | None = None
+        self._destinations_cache_at: float = 0.0
 
     def start(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -210,6 +226,24 @@ class BroadcastTransport:
         if self._thread is not None:
             self._thread.join(timeout=2)
 
+    def _broadcast_destinations(self) -> list[str]:
+        now = time.monotonic()
+        if (
+            self._destinations_cache is None
+            or now - self._destinations_cache_at >= DESTINATION_CACHE_TTL_SECONDS
+        ):
+            try:
+                directed = util.get_directed_broadcast_addresses()
+            except OSError:
+                # Enumeration failing (e.g. a transient psutil/OS error)
+                # should not stop announcing; fall back to the limited
+                # broadcast address alone for this cycle and try again next
+                # time the cache expires.
+                directed = []
+            self._destinations_cache = sorted({LIMITED_BROADCAST_ADDRESS, *directed})
+            self._destinations_cache_at = now
+        return self._destinations_cache
+
     def send(self, advertisement: NodeAdvertisement) -> None:
         if self._socket is None:
             raise RuntimeError("broadcast transport has not been started")
@@ -218,7 +252,14 @@ class BroadcastTransport:
             raise ValueError(
                 f"broadcast is {len(packet)} bytes; maximum is {MAX_PACKET_SIZE}"
             )
-        self._socket.sendto(packet, ("255.255.255.255", self.port))
+        destinations = self._broadcast_destinations()
+        self.last_destinations = destinations
+        for destination in destinations:
+            try:
+                self._socket.sendto(packet, (destination, self.port))
+            except OSError as error:
+                if self.on_send_error is not None:
+                    self.on_send_error(destination, error)
 
     def _receive(self) -> None:
         assert self._socket is not None

@@ -3,6 +3,7 @@ from unittest.mock import Mock
 
 from logitech_flow_kvm.monitors import Monitor
 from logitech_flow_kvm.node import FlowNode
+from logitech_flow_kvm.node import _no_peers_message
 from logitech_flow_kvm.node_config import MonitorInputConfig
 from logitech_flow_kvm.node_config import NodeConfig
 from logitech_flow_kvm.node_protocol import NodeAdvertisement
@@ -64,6 +65,47 @@ def test_invalid_secret_problem_is_visible_in_status():
 
     assert "shared secrets differ" in (node.last_problem or "")
     changed.assert_called_once()
+
+
+def test_send_error_is_visible_in_status():
+    changed = Mock()
+    node = FlowNode(NodeConfig(2, "KEYS", ["MOUSE"]), "secret", on_change=changed)
+
+    node._send_error("192.168.2.255", OSError("Network is unreachable"))
+
+    assert "192.168.2.255" in (node.last_problem or "")
+    assert "Network is unreachable" in (node.last_problem or "")
+    changed.assert_called_once()
+
+
+def test_transport_send_errors_are_wired_to_the_node():
+    node = FlowNode(NodeConfig(2, "KEYS", ["MOUSE"]), "secret")
+
+    assert node.transport.on_send_error == node._send_error
+
+
+def test_no_peers_message_lists_attempted_destinations():
+    message = _no_peers_message(["255.255.255.255", "192.168.2.255"])
+
+    assert message.startswith("No peers discovered.")
+    assert "255.255.255.255" in message
+    assert "192.168.2.255" in message
+
+
+def test_no_peers_message_handles_no_destinations():
+    message = _no_peers_message([])
+
+    assert message.startswith("No peers discovered.")
+
+
+def test_no_peers_problem_clears_once_a_peer_appears():
+    node = make_node()
+    node.last_problem = _no_peers_message(["255.255.255.255"])
+    message = NodeAdvertisement("birch", "birch", 3, [], "KEYS", target_host=3)
+
+    node._message(message, "192.168.0.33")
+
+    assert node.last_problem is None
 
 
 def test_configured_monitor_is_switched_to_its_local_input():

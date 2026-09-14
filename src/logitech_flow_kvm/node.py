@@ -24,10 +24,22 @@ ANNOUNCE_INTERVAL = 2.0
 LEADER_EVENT_DEDUPLICATION_WINDOW = 5.0
 PEER_EXPIRY = ANNOUNCE_INTERVAL * 3
 PEER_DISCOVERY_WARNING = 10.0
-NO_PEERS_MESSAGE = (
-    "No peers discovered. Start flow-node on another host with the same secret; "
-    "if it is running, check LAN broadcast and firewall settings."
-)
+# Only the prefix is stable: the rest of the message lists whatever broadcast
+# destinations were actually tried, so it can't be compared for equality.
+NO_PEERS_MESSAGE_PREFIX = "No peers discovered."
+
+
+def _no_peers_message(destinations: list[str]) -> str:
+    tried = (
+        ", ".join(destinations)
+        if destinations
+        else "nowhere (no network interfaces found)"
+    )
+    return (
+        f"{NO_PEERS_MESSAGE_PREFIX} Start flow-node on another host with the "
+        "same secret; if it is running, check LAN broadcast and firewall "
+        f"settings. Broadcasts were sent to: {tried}."
+    )
 
 
 @dataclass
@@ -71,6 +83,7 @@ class FlowNode:
             port=port,
             on_message=self._message,
             on_invalid_packet=self._invalid_packet,
+            on_send_error=self._send_error,
         )
         self._announcer = threading.Thread(target=self._announce_loop, daemon=True)
         self._remote_clipboard: str | None = None
@@ -208,7 +221,9 @@ class FlowNode:
                     self.device_matches.pop(key, None)
                 else:
                     self.device_matches[key] = matched.id
-        if self.last_problem == NO_PEERS_MESSAGE:
+        if self.last_problem is not None and self.last_problem.startswith(
+            NO_PEERS_MESSAGE_PREFIX
+        ):
             self.last_problem = None
         if message.clipboard is not None:
             self._remote_clipboard = message.clipboard
@@ -223,6 +238,11 @@ class FlowNode:
 
     def _invalid_packet(self, address: str, error: Exception) -> None:
         self.last_problem = f"Ignored packet from {address}: {error}"
+        logger.warning(self.last_problem)
+        self._changed()
+
+    def _send_error(self, destination: str, error: Exception) -> None:
+        self.last_problem = f"Could not broadcast to {destination}: {error}"
         logger.warning(self.last_problem)
         self._changed()
 
@@ -251,8 +271,8 @@ class FlowNode:
                 and time.monotonic() - self._started_at >= PEER_DISCOVERY_WARNING
                 and self.last_problem is None
             ):
-                self.last_problem = NO_PEERS_MESSAGE
-                logger.warning(NO_PEERS_MESSAGE)
+                self.last_problem = _no_peers_message(self.transport.last_destinations)
+                logger.warning(self.last_problem)
                 self._changed()
             try:
                 self.announce()
